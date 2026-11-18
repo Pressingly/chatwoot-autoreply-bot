@@ -35,3 +35,15 @@ def test_main_runs_one_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(entry.uvicorn, "run", lambda app, **kwargs: calls.append(kwargs))
     entry.main()
     assert calls == [{"host": "0.0.0.0", "port": 8000, "workers": 1, "access_log": False}]
+
+
+async def test_build_services_passes_the_configured_time_limits() -> None:
+    settings = Settings.from_env(
+        {**REQUIRED_ENV, "LLM_TIMEOUT_SECONDS": "7", "LLM_MAX_RETRIES": "1", "CHATWOOT_TIMEOUT_SECONDS": "4"}
+    )
+    services = build_services(settings)
+    responder = services.scheduler._respond.__self__
+    assert responder._llm_budget_seconds == settings.llm_budget_seconds == 7 * 2 + 10
+    assert responder._chatwoot._call_timeout_seconds == 4
+    assert services.store._limits.lock_ttl_seconds == settings.lock_ttl_seconds
+    await services.aclose()

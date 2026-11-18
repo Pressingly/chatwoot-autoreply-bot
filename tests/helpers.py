@@ -44,7 +44,7 @@ class FakeChatwoot:
             headers={"api_access_token": "bot-token"},
             transport=httpx.MockTransport(self.handler),
         )
-        return ChatwootClient(http)
+        return ChatwootClient(http, call_timeout_seconds=10)
 
     def calls(self) -> list[tuple[str, str, Any]]:
         return [

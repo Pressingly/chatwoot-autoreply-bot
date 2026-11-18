@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from chatwoot_autoreply_bot.events import TranscriptEntry
+from chatwoot_autoreply_bot.llm import HANDOFF_SENTINEL
 from chatwoot_autoreply_bot.responder import Responder
 from chatwoot_autoreply_bot.scheduler import ReplyScheduler
 from chatwoot_autoreply_bot.store import ValkeyStore
@@ -107,13 +108,15 @@ async def test_llm_over_budget_is_one_handoff(store: ValkeyStore, chatwoot: Fake
     responder._llm_budget_seconds = 0.05
 
     async def hang(messages):
-        await asyncio.sleep(5)
+        await asyncio.sleep(60)
+        return "Too late"
 
     responder._llm.complete = hang
     await store.append(KEY, TranscriptEntry(1, "user", "A"))
     await scheduler.schedule(KEY)
-    await scheduler.drain()
+    await asyncio.wait_for(scheduler.drain(), 1)
     assert chatwoot.posted_messages() == ["H"]
+    assert await store.answered_through(KEY) == 1
     typing = [body for _, path, body in chatwoot.calls() if path == "/toggle_typing_status"]
     assert typing == [{"typing_status": "on"}, {"typing_status": "off"}]
 
@@ -149,3 +152,24 @@ async def test_kill_right_after_the_post_does_not_reply_again_on_resume(
     assert await restarted.resume() == 1
     await restarted.drain()
     assert chatwoot.posted_messages() == ["Answer"]
+
+
+async def test_kill_during_the_handoff_open_does_not_hand_off_again_on_resume(
+    store: ValkeyStore, chatwoot: FakeChatwoot
+) -> None:
+    responder, scheduler = wire(store, chatwoot, FakeLlm(HANDOFF_SENTINEL))
+
+    async def die(key):
+        raise asyncio.CancelledError
+
+    responder._chatwoot.open_conversation = die
+    await store.append(KEY, TranscriptEntry(1, "user", "A"))
+    await scheduler.schedule(KEY)
+    await scheduler.drain()
+    assert chatwoot.posted_messages() == ["H"]
+    assert await store.outstanding() == [KEY]
+
+    _, restarted = wire(store, chatwoot, FakeLlm(HANDOFF_SENTINEL))
+    assert await restarted.resume() == 1
+    await restarted.drain()
+    assert chatwoot.posted_messages() == ["H"]

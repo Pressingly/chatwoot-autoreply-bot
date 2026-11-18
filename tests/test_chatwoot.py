@@ -43,7 +43,10 @@ async def test_transport_error_raises() -> None:
     def refuse(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
 
-    client = ChatwootClient(httpx.AsyncClient(base_url="http://chatwoot:3000", transport=httpx.MockTransport(refuse)))
+    client = ChatwootClient(
+        httpx.AsyncClient(base_url="http://chatwoot:3000", transport=httpx.MockTransport(refuse)),
+        call_timeout_seconds=10,
+    )
     with pytest.raises(ChatwootError, match="ConnectError"):
         await client.conversation_status(KEY)
 
@@ -51,7 +54,8 @@ async def test_transport_error_raises() -> None:
 @pytest.mark.parametrize("response", [httpx.Response(200, json={}), httpx.Response(200, content=b"not json")])
 async def test_status_missing_raises(response: httpx.Response) -> None:
     client = ChatwootClient(
-        httpx.AsyncClient(base_url="http://chatwoot:3000", transport=httpx.MockTransport(lambda _: response))
+        httpx.AsyncClient(base_url="http://chatwoot:3000", transport=httpx.MockTransport(lambda _: response)),
+        call_timeout_seconds=10,
     )
     with pytest.raises(ChatwootError, match="no status"):
         await client.conversation_status(KEY)
@@ -59,7 +63,10 @@ async def test_status_missing_raises(response: httpx.Response) -> None:
 
 async def test_message_without_id_returns_none() -> None:
     client = ChatwootClient(
-        httpx.AsyncClient(base_url="http://chatwoot:3000", transport=httpx.MockTransport(lambda _: httpx.Response(204)))
+        httpx.AsyncClient(
+            base_url="http://chatwoot:3000", transport=httpx.MockTransport(lambda _: httpx.Response(204))
+        ),
+        call_timeout_seconds=10,
     )
     assert await client.post_message(KEY, "Hi") is None
 

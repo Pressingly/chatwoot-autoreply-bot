@@ -15,7 +15,7 @@ class ChatwootError(RuntimeError):
 
 
 class ChatwootClient:
-    def __init__(self, http: httpx.AsyncClient, call_timeout_seconds: float = 10.0) -> None:
+    def __init__(self, http: httpx.AsyncClient, call_timeout_seconds: float) -> None:
         self._http = http
         self._call_timeout_seconds = call_timeout_seconds
 
