@@ -1,0 +1,120 @@
+# chatwoot-autoreply-bot
+
+A small Chatwoot [Agent Bot](https://www.chatwoot.com/docs/product/others/agent-bots) that answers customers with
+any OpenAI-compatible LLM (OpenAI, an Askii key, a local gateway) and hands the conversation to a human when it
+should. It is a separate service that talks to Chatwoot only through its webhook and REST API.
+
+## How it works
+
+1. Chatwoot posts every event of a bot-connected inbox to `POST /webhook`, signed with the Agent Bot's secret.
+2. The bot refuses bodies over `MAX_BODY_BYTES` (1 MiB) before reading them, checks the signature (HMAC-SHA256
+   over `"<timestamp>.<raw body>"`, at most 300 s old), drops repeated
+   deliveries by `X-Chatwoot-Delivery`, records the message in a per-conversation transcript in Valkey and answers
+   `200` straight away. The LLM never runs inside the request; Chatwoot gives a bot webhook five seconds.
+3. Only a public, incoming `message_created` in a **pending** conversation triggers a reply. Agent replies, the
+   bot's own replies and messages in open conversations only extend the transcript. Private notes are ignored.
+4. Replies are debounced per conversation (`DEBOUNCE_SECONDS`, default 3): a burst of customer messages gets one
+   answer that sees all of them. A per-conversation lock means two replies never run at once. The LLM call is
+   capped at `LLM_TIMEOUT_SECONDS` x (`LLM_MAX_RETRIES` + 1) + 10 s (past that the bot hands off), each Chatwoot
+   call at `CHATWOOT_TIMEOUT_SECONDS`, and the lock lasts longer than the worst case of all of them.
+5. Before answering, the bot re-reads the conversation status and stays silent unless it is still pending. It
+   shows typing, calls the LLM with the system prompt plus the transcript, checks the status again, and posts.
+6. The bot remembers the newest customer message each reply (or handoff, or human agent reply) has answered,
+   writing that down just before it posts. A message that arrives while the LLM is still working gets its own
+   reply right after.
+
+### Handoff
+
+The bot posts `HANDOFF_MESSAGE` and sets the conversation to **open**, so it lands with your agents, when:
+
+- the customer's unanswered messages contain a `HANDOFF_PHRASES` entry, such as "talk to a human";
+- the LLM answers with the `[[HANDOFF]]` sentinel (the prompt tells it to when it is asked for a human, the
+  customer is upset, or it cannot answer). The sentinel is never posted;
+- the LLM call fails after its retries, returns nothing, or the reply turn fails for any other reason.
+
+The note is posted once; opening the conversation is retried three times. If every attempt fails the bot logs an
+error and the conversation stays pending.
+
+The bot never writes in an open, resolved or snoozed conversation. Set the conversation back to pending to hand
+it back to the bot.
+
+## Setup in Chatwoot
+
+1. **Settings > Bots > Add bot** (or `POST /api/v1/accounts/{id}/agent_bots`). Set the webhook URL to
+   `https://<bot-host>/webhook` (in the Moneta server bundle, `https://chatwoot-autoreply.<domain>/webhook`).
+2. Copy the bot's **access token** into `CHATWOOT_BOT_TOKEN` and its **secret** into `CHATWOOT_BOT_SECRET`.
+   Chatwoot only signs webhooks when the bot has a secret; unsigned requests are refused.
+3. **Settings > Inboxes > (inbox) > Bot configuration**: select the bot. New conversations in that inbox start as
+   pending and go to the bot first.
+4. If Chatwoot reaches the bot on a private address, Chatwoot's own SSRF guard (`SafeFetch`) refuses the webhook
+   unless `SAFE_FETCH_ALLOW_PRIVATE_NETWORK=true`. A public URL that resolves to the same host avoids that.
+
+The bot token may read a conversation, toggle its status and typing indicator, and create messages. It cannot
+list messages, which is why the bot keeps its own transcript from the webhooks it has seen.
+
+## Configuration
+
+Settings come from the environment only. The service refuses to start if a required one is missing.
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `CHATWOOT_BOT_TOKEN` | yes | | Agent Bot access token, sent as `api_access_token` |
+| `CHATWOOT_BOT_SECRET` | yes | | Agent Bot secret, verifies `X-Chatwoot-Signature` |
+| `VALKEY_URL` | yes | | Valkey/Redis URL, e.g. `redis://valkey:6379/1` |
+| `LLM_API_KEY` | yes | | API key for the LLM endpoint |
+| `LLM_MODEL` | yes | | Model name, e.g. `gpt-4o-mini` |
+| `LLM_BASE_URL` | no | OpenAI | Any OpenAI-compatible `/v1` base URL |
+| `CHATWOOT_INTERNAL_URL` | no | `http://chatwoot:3000` | Where the bot calls the Chatwoot API |
+| `SYSTEM_PROMPT` | no | built in | Prompt for every account |
+| `SYSTEM_PROMPT_ACCOUNT_<id>` | no | | Prompt for one Chatwoot account id, replacing `SYSTEM_PROMPT` |
+| `HANDOFF_MESSAGE` | no | built in | Note posted before opening the conversation |
+| `HANDOFF_PHRASES` | no | built in | Comma-separated, case-insensitive; empty disables the check |
+| `DEBOUNCE_SECONDS` | no | `3` | Quiet time before replying to a burst |
+| `LLM_TIMEOUT_SECONDS` | no | `30` | Per LLM attempt |
+| `LLM_MAX_RETRIES` | no | `2` | Retries after the first LLM attempt |
+| `LLM_MAX_TOKENS` | no | unset | Sent as `max_completion_tokens` when set |
+| `CHATWOOT_TIMEOUT_SECONDS` | no | `10` | Per Chatwoot API call |
+| `SIGNATURE_MAX_SKEW_SECONDS` | no | `300` | Oldest accepted webhook timestamp |
+| `DEDUPE_TTL_SECONDS` | no | `86400` | How long a delivery id is remembered |
+| `TRANSCRIPT_MAX_MESSAGES` | no | `40` | Messages kept per conversation |
+| `TRANSCRIPT_TTL_SECONDS` | no | `604800` | Transcript lifetime after the last message |
+| `MAX_BODY_BYTES` | no | `1048576` | Largest webhook body accepted (larger gets 413) |
+| `PORT` | no | `8000` | HTTP port |
+
+The built-in prompt keeps the bot on the business's own support and has it decline anything else. Keep that
+scope in your own prompts: WhatsApp Business policy does not allow general-purpose assistants. The handoff
+instruction is always appended to whichever prompt applies.
+
+## Running
+
+```bash
+docker build -t chatwoot-autoreply-bot .
+docker run --env-file bot.env -p 8000:8000 chatwoot-autoreply-bot
+```
+
+- Expose only `POST /webhook` publicly. `GET /healthz` is for the container probe; it answers 503 while Valkey
+  is unreachable.
+- One replica is enough. Generations, locks and the answered marker live in Valkey, so more replicas do not
+  answer twice; each process runs one worker.
+- Conversations with a reply still to come are listed in Valkey; on startup the bot reschedules them, so turns
+  waiting or running when it stopped are picked up again without answering twice. A turn killed between marking
+  its messages answered and posting leaves them unanswered until the customer writes again; a turn killed
+  mid-handoff can leave the note without the open.
+- Valkey evicting keys (an `allkeys-lru` policy) can drop a transcript or those markers: that shortens the
+  bot's context, or skips a resume.
+
+## Development
+
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+
+```bash
+uv sync
+uv run ruff format .
+uv run ruff check .
+uv run pytest --cov=chatwoot_autoreply_bot --cov-fail-under=80
+```
+
+## Licence
+
+MIT, see [LICENSE](LICENSE). The bot contains no Chatwoot code: it is an independent service that uses Chatwoot's
+public webhook and REST API, and does not use Chatwoot's Enterprise or Captain features.
