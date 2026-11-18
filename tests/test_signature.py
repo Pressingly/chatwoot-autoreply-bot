@@ -66,3 +66,27 @@ def test_bare_hex_without_prefix_fails() -> None:
 
 def test_non_ascii_signature_fails_without_raising() -> None:
     assert not check(str(NOW), "sha256=é")
+
+
+KNOWN_SECRET = "known-answer-secret"
+KNOWN_TIMESTAMP = "1800000000"
+KNOWN_BODY = b'{"event":"message_created","content":"Hi"}'
+KNOWN_DIGEST = "a6bc7e39b0fd52f9a908059e3ad3b8f03d746caafe74758f68ab4d2b75589b03"
+
+
+def test_matches_chatwoot_ruby_known_answer() -> None:
+    """Computed with Ruby: OpenSSL::HMAC.hexdigest("SHA256", secret, "#{ts}.#{body}") (lib/webhooks/trigger.rb)."""
+    assert sign(KNOWN_SECRET, KNOWN_TIMESTAMP, KNOWN_BODY) == f"sha256={KNOWN_DIGEST}"
+    assert verify(
+        KNOWN_SECRET,
+        KNOWN_TIMESTAMP,
+        f"sha256={KNOWN_DIGEST}",
+        KNOWN_BODY,
+        now=int(KNOWN_TIMESTAMP),
+        max_skew_seconds=300,
+    )
+
+
+@pytest.mark.parametrize("timestamp", ["²", "1" * 5000, "١٨٠٠٠٠٠٠٠٠"])
+def test_unicode_or_huge_timestamp_is_rejected_without_raising(timestamp: str) -> None:
+    assert not check(timestamp, "sha256=00")

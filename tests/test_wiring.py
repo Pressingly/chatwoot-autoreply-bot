@@ -15,6 +15,9 @@ async def test_build_services_wires_real_clients() -> None:
     assert isinstance(services.store, ValkeyStore)
     assert isinstance(services.scheduler, ReplyScheduler)
     assert len(services.closers) == 3
+    pool_kwargs = services.store._client.connection_pool.connection_kwargs
+    assert pool_kwargs["socket_timeout"] == 2.0
+    assert pool_kwargs["socket_connect_timeout"] == 2.0
     await services.aclose()
 
 

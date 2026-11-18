@@ -6,6 +6,7 @@ from chatwoot_autoreply_bot.events import (
     ATTACHMENT_PLACEHOLDER,
     ConversationKey,
     TranscriptEntry,
+    is_human_agent_reply,
     parse_message_event,
     should_reply,
     transcript_entry,
@@ -75,3 +76,26 @@ def test_reply_trigger_matrix(kwargs: dict, replies: bool) -> None:
 )
 def test_transcript_matrix(kwargs: dict, expected: TranscriptEntry | None) -> None:
     assert transcript_entry(parsed(**kwargs)) == expected
+
+
+@pytest.mark.parametrize("raw_id", ["²", "1" * 5000])
+def test_unicode_or_huge_ids_are_ignored(raw_id: str) -> None:
+    assert parse_message_event({**message_payload(), "id": raw_id}) is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "human"),
+    [
+        ({"message_type": "outgoing", "sender_type": "user"}, True),
+        ({"message_type": "outgoing", "sender_type": "agent_bot"}, False),
+        ({"message_type": "outgoing", "sender_type": "user", "private": True}, False),
+        ({"message_type": "incoming", "sender_type": "contact"}, False),
+        ({"message_type": "outgoing", "sender_type": "user", "event": "message_updated"}, False),
+    ],
+)
+def test_human_agent_reply(kwargs: dict, human: bool) -> None:
+    sender_type = kwargs.pop("sender_type")
+    payload = {**message_payload(**kwargs), "sender": {"id": 1, "type": sender_type}}
+    event = parse_message_event(payload)
+    assert event is not None
+    assert is_human_agent_reply(event) is human

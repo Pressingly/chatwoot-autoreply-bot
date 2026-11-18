@@ -20,7 +20,13 @@ from redis.asyncio import Redis
 
 from chatwoot_autoreply_bot.chatwoot import ChatwootClient
 from chatwoot_autoreply_bot.config import Settings
-from chatwoot_autoreply_bot.events import parse_message_event, should_reply, transcript_entry
+from chatwoot_autoreply_bot.digits import parse_digits
+from chatwoot_autoreply_bot.events import (
+    is_human_agent_reply,
+    parse_message_event,
+    should_reply,
+    transcript_entry,
+)
 from chatwoot_autoreply_bot.llm import LlmClient
 from chatwoot_autoreply_bot.responder import Responder
 from chatwoot_autoreply_bot.scheduler import ReplyScheduler
@@ -30,6 +36,11 @@ from chatwoot_autoreply_bot.store import StoreLimits, ValkeyStore
 log = logging.getLogger(__name__)
 
 Clock = Callable[[], float]
+VALKEY_TIMEOUT_SECONDS = 2.0
+
+
+class BodyTooLarge(Exception):
+    """The request body exceeds the configured limit."""
 
 
 @dataclass
@@ -54,7 +65,11 @@ def store_limits(settings: Settings) -> StoreLimits:
 
 
 def build_services(settings: Settings) -> Services:
-    valkey = Redis.from_url(settings.valkey_url)
+    valkey = Redis.from_url(
+        settings.valkey_url,
+        socket_timeout=VALKEY_TIMEOUT_SECONDS,
+        socket_connect_timeout=VALKEY_TIMEOUT_SECONDS,
+    )
     store = ValkeyStore(valkey, store_limits(settings))
     chatwoot = ChatwootClient.build(
         settings.chatwoot_internal_url, settings.chatwoot_bot_token, settings.chatwoot_timeout_seconds
@@ -80,6 +95,7 @@ def build_services(settings: Settings) -> Services:
         respond=responder.respond,
         hand_off=responder.hand_off,
         debounce_seconds=settings.debounce_seconds,
+        turn_timeout_seconds=settings.turn_timeout_seconds,
     )
     return Services(store, scheduler, [chatwoot.aclose, llm.aclose, valkey.aclose])
 
@@ -91,6 +107,8 @@ async def record_and_schedule(services: Services, payload: Any) -> None:
     entry = transcript_entry(event)
     if entry is not None:
         await services.store.append(event.key, entry)
+    if is_human_agent_reply(event):
+        await services.store.advance_answered(event.key, event.message_id)
     if should_reply(event):
         await services.scheduler.schedule(event.key)
 
@@ -104,6 +122,7 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         services = services_factory(settings)
         app.state.services = services
+        await _resume_quietly(services)
         try:
             yield
         finally:
@@ -112,12 +131,20 @@ def create_app(
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    async def healthz(request: Request) -> JSONResponse:
+        try:
+            await request.app.state.services.store.ping()
+        except Exception as error:
+            log.warning("health check failed error=%s", type(error).__name__)
+            return _status(503, "valkey unavailable")
+        return _status(200, "ok")
 
     @app.post("/webhook")
     async def webhook(request: Request) -> JSONResponse:
-        body = await request.body()
+        try:
+            body = await read_limited_body(request, settings.max_body_bytes)
+        except BodyTooLarge:
+            return _status(413, "body too large")
         signed = verify(
             settings.chatwoot_bot_secret,
             request.headers.get("X-Chatwoot-Timestamp"),
@@ -135,6 +162,28 @@ def create_app(
         return await _accept(request.app.state.services, request.headers.get("X-Chatwoot-Delivery"), payload)
 
     return app
+
+
+async def read_limited_body(request: Request, max_bytes: int) -> bytes:
+    """Read the body before it is authenticated, refusing anything over ``max_bytes`` without buffering it."""
+    declared = parse_digits(request.headers.get("content-length", ""))
+    if declared is not None and declared > max_bytes:
+        raise BodyTooLarge
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > max_bytes:
+            raise BodyTooLarge
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _resume_quietly(services: Services) -> None:
+    try:
+        await services.scheduler.resume()
+    except Exception as error:
+        log.warning("resume failed error=%s", type(error).__name__)
 
 
 async def _accept(services: Services, delivery_id: str | None, payload: Any) -> JSONResponse:

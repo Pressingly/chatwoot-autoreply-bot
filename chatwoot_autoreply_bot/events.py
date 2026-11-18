@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from chatwoot_autoreply_bot.digits import parse_digits
+
 Role = Literal["user", "assistant"]
 
 MESSAGE_CREATED = "message_created"
@@ -28,6 +30,7 @@ class MessageEvent:
     content: str
     has_attachments: bool
     conversation_status: str
+    sender_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -42,8 +45,8 @@ def _int(value: Any) -> int | None:
         return None
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
+    if isinstance(value, str):
+        return parse_digits(value)
     return None
 
 
@@ -73,6 +76,7 @@ def parse_message_event(payload: Any) -> MessageEvent | None:
         content=content.strip() if isinstance(content, str) else "",
         has_attachments=bool(payload.get("attachments")),
         conversation_status=str(conversation.get("status") or ""),
+        sender_type=str(_dict(payload.get("sender")).get("type") or ""),
     )
 
 
@@ -85,6 +89,16 @@ def transcript_entry(event: MessageEvent) -> TranscriptEntry | None:
     if not content:
         return None
     return TranscriptEntry(event.message_id, role, content)
+
+
+def is_human_agent_reply(event: MessageEvent) -> bool:
+    """A public reply by a Chatwoot user (an agent), which answers every earlier customer message."""
+    return (
+        event.event == MESSAGE_CREATED
+        and event.message_type == "outgoing"
+        and not event.private
+        and event.sender_type == "user"
+    )
 
 
 def should_reply(event: MessageEvent) -> bool:

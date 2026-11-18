@@ -21,6 +21,7 @@ reasonable time to release a fix before disclosing publicly.
 - Replaying a signed webhook outside the timestamp window, or getting one delivery processed twice.
 - Leaking message content, the bot token, the bot secret or the LLM key into logs or responses.
 - Getting the bot to write in a conversation that is not pending.
+- Exhausting memory or crashing the service with an unauthenticated request.
 
 ## Deployment notes
 
@@ -30,7 +31,8 @@ reasonable time to release a fix before disclosing publicly.
   unsigned request.
 - **The bot token acts for the Agent Bot**: it can read and update conversations and post messages in the inboxes
   the bot is connected to. Treat it like an agent's token.
-- **Run one replica.** A second one would answer the same burst twice.
+- **Keep Valkey private.** Anyone who can write to the bot's Valkey database can change what the bot remembers
+  and when it replies.
 
 ## Out of scope
 

@@ -8,7 +8,13 @@ from openai import AsyncOpenAI
 
 from chatwoot_autoreply_bot.events import TranscriptEntry
 from chatwoot_autoreply_bot.llm import HANDOFF_SENTINEL, LlmClient
-from chatwoot_autoreply_bot.responder import Outcome, Responder, asks_for_human, unanswered_customer_messages
+from chatwoot_autoreply_bot.responder import (
+    Outcome,
+    Responder,
+    asks_for_human,
+    llm_context,
+    unanswered_customer_messages,
+)
 from chatwoot_autoreply_bot.store import ValkeyStore
 from tests.helpers import KEY, FakeChatwoot, completion_response
 
@@ -33,8 +39,13 @@ class FakeLlm:
         return LlmClient(AsyncOpenAI(api_key="k", base_url="https://llm.test/v1", http_client=http, max_retries=0), "m")
 
 
+async def no_sleep(_: float) -> None:
+    return None
+
+
 def responder(chatwoot: FakeChatwoot, store: ValkeyStore, llm: FakeLlm) -> Responder:
     return Responder(
+        sleep=no_sleep,
         chatwoot=chatwoot.client(),
         llm=llm.client(),
         store=store,
@@ -49,15 +60,25 @@ async def seed(store: ValkeyStore, *entries: TranscriptEntry) -> None:
         await store.append(KEY, entry)
 
 
-def test_unanswered_messages_are_the_trailing_customer_run() -> None:
+def test_unanswered_messages_are_customer_messages_past_the_watermark() -> None:
     transcript = [
         TranscriptEntry(1, "user", "a"),
-        TranscriptEntry(2, "assistant", "b"),
+        TranscriptEntry(2, "user", "b"),
+        TranscriptEntry(1001, "assistant", "reply to a"),
         TranscriptEntry(3, "user", "c"),
-        TranscriptEntry(4, "user", "d"),
     ]
-    assert [entry.content for entry in unanswered_customer_messages(transcript)] == ["c", "d"]
-    assert unanswered_customer_messages(transcript[:2]) == []
+    assert [entry.content for entry in unanswered_customer_messages(transcript, 1)] == ["b", "c"]
+    assert unanswered_customer_messages(transcript, 3) == []
+
+
+def test_llm_context_puts_unanswered_messages_last() -> None:
+    transcript = [
+        TranscriptEntry(1, "user", "a"),
+        TranscriptEntry(2, "user", "b"),
+        TranscriptEntry(1001, "assistant", "reply to a"),
+    ]
+    unanswered = unanswered_customer_messages(transcript, 1)
+    assert [entry.content for entry in llm_context(transcript, unanswered)] == ["a", "reply to a", "b"]
 
 
 def test_asks_for_human_is_case_insensitive() -> None:
@@ -92,6 +113,7 @@ async def test_never_replies_outside_pending(chatwoot: FakeChatwoot, store: Valk
 async def test_skips_when_nothing_is_unanswered(chatwoot: FakeChatwoot, store: ValkeyStore) -> None:
     llm = FakeLlm()
     await seed(store, TranscriptEntry(1, "user", "Hi"), TranscriptEntry(2, "assistant", "Hello"))
+    await store.advance_answered(KEY, 1)
     assert await responder(chatwoot, store, llm).respond(KEY) is Outcome.SKIPPED
     assert llm.requests == []
 
@@ -172,3 +194,57 @@ async def test_failing_to_record_the_reply_does_not_undo_it(chatwoot: FakeChatwo
     assert await responder(chatwoot, seeded, FakeLlm()).respond(KEY) is Outcome.REPLIED
     assert chatwoot.posted_messages() == ["Happy to help!"]
     assert "/toggle_status" not in chatwoot.writes()
+
+
+async def test_reply_and_handoff_advance_the_watermark(chatwoot: FakeChatwoot, store: ValkeyStore) -> None:
+    await seed(store, TranscriptEntry(1, "user", "Hi"), TranscriptEntry(2, "user", "Open?"))
+    await responder(chatwoot, store, FakeLlm()).respond(KEY)
+    assert await store.answered_through(KEY) == 2
+
+    await seed(store, TranscriptEntry(3, "user", "talk to a human"))
+    assert await responder(chatwoot, store, FakeLlm()).respond(KEY) is Outcome.HANDED_OFF
+    assert await store.answered_through(KEY) == 3
+
+
+async def test_handoff_retries_the_open_without_reposting_the_note(chatwoot: FakeChatwoot, store: ValkeyStore) -> None:
+    attempts: list[int] = []
+    original = chatwoot.handler
+
+    def flaky(request):
+        if request.url.path.endswith("/toggle_status"):
+            attempts.append(1)
+            if len(attempts) < 3:
+                return httpx.Response(500)
+        return original(request)
+
+    chatwoot.handler = flaky
+    assert await responder(chatwoot, store, FakeLlm()).hand_off(KEY, reason="test") is Outcome.HANDED_OFF
+    assert len(attempts) == 3
+    assert chatwoot.posted_messages() == [HANDOFF_NOTE]
+
+
+async def test_handoff_gives_up_after_bounded_open_attempts(chatwoot: FakeChatwoot, store: ValkeyStore) -> None:
+    chatwoot.fail_paths.add("/toggle_status")
+    assert await responder(chatwoot, store, FakeLlm()).hand_off(KEY, reason="test") is Outcome.HANDOFF_FAILED
+    assert chatwoot.writes().count("/toggle_status") == 3
+    assert chatwoot.posted_messages() == [HANDOFF_NOTE]
+
+
+async def test_handoff_never_raises(chatwoot: FakeChatwoot, store: ValkeyStore) -> None:
+    bot = responder(chatwoot, store, FakeLlm())
+
+    async def explode(key):
+        raise RuntimeError("unexpected")
+
+    bot._post_handoff_note = explode
+    assert await bot.hand_off(KEY, reason="test") is Outcome.HANDOFF_FAILED
+
+
+async def test_failing_watermark_does_not_undo_the_reply(chatwoot: FakeChatwoot, store: ValkeyStore) -> None:
+    class WatermarkFails(ValkeyStore):
+        async def advance_answered(self, key, message_id) -> None:
+            raise ConnectionError("down")
+
+    broken = WatermarkFails(store._client, store._limits)
+    await store.append(KEY, TranscriptEntry(1, "user", "Hi"))
+    assert await responder(chatwoot, broken, FakeLlm()).respond(KEY) is Outcome.REPLIED

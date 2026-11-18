@@ -10,9 +10,13 @@ pending conversations through an OpenAI-compatible LLM and hands off to humans b
 - `chatwoot_autoreply_bot/app.py`: FastAPI app, `POST /webhook` (verify, dedupe, record, schedule, 200) and
   `GET /healthz`. Generated docs routes are off. `create_app` takes a services factory for tests.
 - `signature.py`: the HMAC check. `events.py`: payload parsing plus the reply-trigger and transcript rules.
-- `store.py`: Valkey state (delivery dedupe, transcripts keyed by message id, generations, locks).
-- `scheduler.py`: per-conversation debounce and lock; any failure in a turn ends in a handoff.
-- `responder.py`: one reply turn. `chatwoot.py`: the Chatwoot REST calls. `llm.py`: the LLM call and sentinel.
+- `store.py`: Valkey state (delivery dedupe, transcripts keyed by message id, answered marker, generations,
+  outstanding turns, locks).
+- `scheduler.py`: per-conversation debounce, lock and turn timeout, resume at startup; a failed turn ends in a
+  handoff. `responder.py`'s `hand_off` never raises, so a handoff is never repeated.
+- `digits.py`: strict ASCII digit parsing for every id and timestamp from a request.
+- `responder.py`: one reply turn; customer messages past the answered marker are unanswered.
+- `chatwoot.py`: the Chatwoot REST calls. `llm.py`: the LLM call and sentinel.
 
 ## Commands
 
@@ -32,7 +36,8 @@ docker build --platform linux/amd64 .
 - Log account and conversation ids and exception class names only, never message content, provider error
   bodies or secrets.
 - Do not read, copy or adapt Chatwoot's `enterprise/` code (Captain and other Enterprise features).
-- Only MIT, BSD or Apache-2.0 dependencies.
+- Only MIT, BSD or Apache-2.0 dependencies. `[tool.uv] exclude-newer` keeps a 14-day cooling window: move the
+  date forward when re-locking, never past 14 days ago.
 - Tests never need a live Chatwoot, LLM or Valkey: use `httpx.MockTransport` and `fakeredis`.
 
 ## Branch policy

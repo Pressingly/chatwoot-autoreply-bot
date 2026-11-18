@@ -9,7 +9,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 
+from chatwoot_autoreply_bot.digits import parse_digits
+
 SIGNATURE_PREFIX = "sha256="
+TIMESTAMP_MAX_DIGITS = 12
 
 
 def sign(secret: str, timestamp: str, body: bytes) -> str:
@@ -18,9 +21,8 @@ def sign(secret: str, timestamp: str, body: bytes) -> str:
 
 
 def _timestamp_fresh(timestamp: str, now: float, max_skew_seconds: int) -> bool:
-    if not timestamp.isdigit():
-        return False
-    return abs(now - int(timestamp)) <= max_skew_seconds
+    seconds = parse_digits(timestamp, TIMESTAMP_MAX_DIGITS)
+    return seconds is not None and abs(now - seconds) <= max_skew_seconds
 
 
 def verify(

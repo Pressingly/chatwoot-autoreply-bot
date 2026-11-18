@@ -77,3 +77,15 @@ def test_invalid_numbers_fail(name: str, value: str) -> None:
 def test_lock_outlives_the_worst_case_reply() -> None:
     result = settings(LLM_TIMEOUT_SECONDS="30", LLM_MAX_RETRIES="2", CHATWOOT_TIMEOUT_SECONDS="10")
     assert result.lock_ttl_seconds > 30 * 3 + 10 * 6
+
+
+@pytest.mark.parametrize("suffix", ["²", "1" * 5000])
+def test_account_prompt_rejects_unicode_or_huge_ids(suffix: str) -> None:
+    with pytest.raises(ConfigError, match="numeric"):
+        settings(**{f"SYSTEM_PROMPT_ACCOUNT_{suffix}": "x"})
+
+
+def test_turn_ends_before_the_lock_expires() -> None:
+    result = settings()
+    assert 0 < result.turn_timeout_seconds < result.lock_ttl_seconds
+    assert settings(MAX_BODY_BYTES="2048").max_body_bytes == 2048

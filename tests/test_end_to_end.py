@@ -28,7 +28,11 @@ async def test_burst_of_customer_messages_gets_one_reply_with_full_context(
         handoff_phrases=(),
     )
     scheduler = ReplyScheduler(
-        store=store, respond=responder.respond, hand_off=responder.hand_off, debounce_seconds=0.05
+        store=store,
+        respond=responder.respond,
+        hand_off=responder.hand_off,
+        debounce_seconds=0.05,
+        turn_timeout_seconds=30,
     )
     app = create_app(SETTINGS, lambda _: Services(store, scheduler), clock=lambda: NOW)
 

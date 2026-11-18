@@ -31,11 +31,16 @@ class SpyScheduler:
         self.scheduled: list[ConversationKey] = []
         self.fail = fail
         self.closed = False
+        self.resumed = False
 
     async def schedule(self, key: ConversationKey) -> None:
         if self.fail:
             raise ConnectionError("valkey down")
         self.scheduled.append(key)
+
+    async def resume(self) -> int:
+        self.resumed = True
+        return 0
 
     async def aclose(self) -> None:
         self.closed = True
@@ -86,6 +91,10 @@ async def test_healthz(harness: Harness) -> None:
     response = await harness.client.get("/healthz")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+async def test_startup_resumes_outstanding_turns(harness: Harness) -> None:
+    assert harness.scheduler.resumed
 
 
 @pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
@@ -194,3 +203,65 @@ async def test_valkey_outage_returns_500(valkey: FakeAsyncRedis) -> None:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://bot") as client:
             response = await Harness(client, store, SpyScheduler()).deliver(message_payload())
     assert response.status_code == 500
+
+
+async def test_healthz_reports_valkey_outage(valkey: FakeAsyncRedis) -> None:
+    class DownStore(ValkeyStore):
+        async def ping(self) -> bool:
+            raise ConnectionError("down")
+
+    store = DownStore(valkey, LIMITS)
+    app = create_app(SETTINGS, lambda _: Services(store, SpyScheduler()), clock=lambda: NOW)  # type: ignore[arg-type]
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://bot") as client:
+            response = await client.get("/healthz")
+    assert response.status_code == 503
+
+
+async def test_oversized_declared_body_is_refused_before_the_signature(harness: Harness) -> None:
+    response = await harness.client.post(
+        "/webhook", content=b"{}", headers={"Content-Length": str(SETTINGS.max_body_bytes + 1)}
+    )
+    assert response.status_code == 413
+
+
+async def test_oversized_streamed_body_is_refused(harness: Harness) -> None:
+    async def chunks():
+        for _ in range(3):
+            yield b"x" * (SETTINGS.max_body_bytes // 2)
+
+    response = await harness.client.post("/webhook", content=chunks())
+    assert response.status_code == 413
+
+
+async def test_body_at_the_limit_still_reaches_the_signature_check(harness: Harness) -> None:
+    response = await harness.client.post("/webhook", content=b"x" * SETTINGS.max_body_bytes)
+    assert response.status_code == 401
+
+
+async def test_huge_content_length_value_does_not_crash(harness: Harness) -> None:
+    response = await harness.client.post("/webhook", content=b"{}", headers={"Content-Length": "9" * 5000})
+    assert response.status_code in (400, 401, 413)
+
+
+@pytest.mark.parametrize("timestamp", ["²", "1" * 5000])
+async def test_unicode_or_huge_timestamp_is_unauthorised(harness: Harness, timestamp: str) -> None:
+    headers = {"X-Chatwoot-Timestamp": timestamp.encode("utf-8"), "X-Chatwoot-Signature": b"sha256=00"}
+    response = await harness.client.post("/webhook", content=b"{}", headers=headers)
+    assert response.status_code == 401
+
+
+async def test_human_agent_reply_marks_earlier_messages_answered(harness: Harness) -> None:
+    await harness.deliver(message_payload(message_id=3), delivery="d-a")
+    agent_reply = {
+        **message_payload(message_id=9, message_type="outgoing", content="On it"),
+        "sender": {"type": "user"},
+    }
+    await harness.deliver(agent_reply, delivery="d-b")
+    assert await harness.store.answered_through(KEY) == 9
+
+
+async def test_bot_echo_does_not_mark_messages_answered(harness: Harness) -> None:
+    echo = {**message_payload(message_id=9, message_type="outgoing", content="Hi"), "sender": {"type": "agent_bot"}}
+    await harness.deliver(echo)
+    assert await harness.store.answered_through(KEY) == 0

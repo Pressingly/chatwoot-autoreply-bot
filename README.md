@@ -7,15 +7,19 @@ should. It is a separate service that talks to Chatwoot only through its webhook
 ## How it works
 
 1. Chatwoot posts every event of a bot-connected inbox to `POST /webhook`, signed with the Agent Bot's secret.
-2. The bot checks the signature (HMAC-SHA256 over `"<timestamp>.<raw body>"`, at most 300 s old), drops repeated
+2. The bot refuses bodies over `MAX_BODY_BYTES` (1 MiB) before reading them, checks the signature (HMAC-SHA256
+   over `"<timestamp>.<raw body>"`, at most 300 s old), drops repeated
    deliveries by `X-Chatwoot-Delivery`, records the message in a per-conversation transcript in Valkey and answers
    `200` straight away. The LLM never runs inside the request; Chatwoot gives a bot webhook five seconds.
 3. Only a public, incoming `message_created` in a **pending** conversation triggers a reply. Agent replies, the
    bot's own replies and messages in open conversations only extend the transcript. Private notes are ignored.
 4. Replies are debounced per conversation (`DEBOUNCE_SECONDS`, default 3): a burst of customer messages gets one
-   answer that sees all of them. A per-conversation lock means two replies never run at once.
+   answer that sees all of them. A per-conversation lock means two replies never run at once, and each turn is cut
+   off before the lock could expire.
 5. Before answering, the bot re-reads the conversation status and stays silent unless it is still pending. It
    shows typing, calls the LLM with the system prompt plus the transcript, checks the status again, and posts.
+6. The bot remembers the newest customer message each reply (or handoff, or human agent reply) has answered.
+   A message that arrives while the LLM is still working gets its own reply right after.
 
 ### Handoff
 
@@ -26,13 +30,16 @@ The bot posts `HANDOFF_MESSAGE` and sets the conversation to **open**, so it lan
   customer is upset, or it cannot answer). The sentinel is never posted;
 - the LLM call fails after its retries, returns nothing, or the reply turn fails for any other reason.
 
+The note is posted once; opening the conversation is retried three times. If every attempt fails the bot logs an
+error and the conversation stays pending.
+
 The bot never writes in an open, resolved or snoozed conversation. Set the conversation back to pending to hand
 it back to the bot.
 
 ## Setup in Chatwoot
 
 1. **Settings > Bots > Add bot** (or `POST /api/v1/accounts/{id}/agent_bots`). Set the webhook URL to
-   `https://<bot-host>/webhook`.
+   `https://<bot-host>/webhook` (in the Moneta server bundle, `https://chatwoot-autoreply.<domain>/webhook`).
 2. Copy the bot's **access token** into `CHATWOOT_BOT_TOKEN` and its **secret** into `CHATWOOT_BOT_SECRET`.
    Chatwoot only signs webhooks when the bot has a secret; unsigned requests are refused.
 3. **Settings > Inboxes > (inbox) > Bot configuration**: select the bot. New conversations in that inbox start as
@@ -69,6 +76,7 @@ Settings come from the environment only. The service refuses to start if a requi
 | `DEDUPE_TTL_SECONDS` | no | `86400` | How long a delivery id is remembered |
 | `TRANSCRIPT_MAX_MESSAGES` | no | `40` | Messages kept per conversation |
 | `TRANSCRIPT_TTL_SECONDS` | no | `604800` | Transcript lifetime after the last message |
+| `MAX_BODY_BYTES` | no | `1048576` | Largest webhook body accepted (larger gets 413) |
 | `PORT` | no | `8000` | HTTP port |
 
 The built-in prompt keeps the bot on the business's own support and has it decline anything else. Keep that
@@ -82,12 +90,15 @@ docker build -t chatwoot-autoreply-bot .
 docker run --env-file bot.env -p 8000:8000 chatwoot-autoreply-bot
 ```
 
-- Expose only `POST /webhook` publicly. `GET /healthz` is for the container probe.
-- Run **one** replica with one worker. Debounce timers live in the process, so a second replica would answer
-  twice; the Valkey lock only keeps replies from overlapping.
-- Replies still waiting for their debounce when the process stops are lost. The conversation stays pending and
-  the bot answers the customer's next message.
-- Valkey evicting keys (an `allkeys-lru` policy) can drop a transcript, which only shortens the bot's context.
+- Expose only `POST /webhook` publicly. `GET /healthz` is for the container probe; it answers 503 while Valkey
+  is unreachable.
+- One replica is enough. Generations, locks and the answered marker live in Valkey, so more replicas do not
+  answer twice; each process runs one worker.
+- Conversations with a reply still to come are listed in Valkey; on startup the bot reschedules them, so turns
+  waiting or running when it stopped are picked up again. A turn killed after posting but before recording the
+  reply can be answered twice; a turn killed mid-handoff can leave the note without the open.
+- Valkey evicting keys (an `allkeys-lru` policy) can drop a transcript or those markers: that shortens the
+  bot's context, or skips a resume.
 
 ## Development
 

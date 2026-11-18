@@ -13,9 +13,21 @@ from dataclasses import dataclass
 
 from redis.asyncio import Redis
 
+from chatwoot_autoreply_bot.digits import parse_digits
 from chatwoot_autoreply_bot.events import ConversationKey, TranscriptEntry
 
 PREFIX = "cwbot"
+OUTSTANDING_KEY = f"{PREFIX}:outstanding"
+
+RAISE_TO_MAX = """
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+if tonumber(ARGV[1]) > current then redis.call('SET', KEYS[1], ARGV[1]) end
+redis.call('EXPIRE', KEYS[1], ARGV[2])
+"""
+DELETE_IF_EQUAL = """
+if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then return redis.call('HDEL', KEYS[1], ARGV[1]) end
+return 0
+"""
 
 
 def _conversation_prefix(key: ConversationKey) -> str:
@@ -89,6 +101,29 @@ class ValkeyStore:
         value = await self._client.get(f"{_conversation_prefix(key)}:generation")
         return int(value) if value is not None else 0
 
+    async def answered_through(self, key: ConversationKey) -> int:
+        value = await self._client.get(f"{_conversation_prefix(key)}:answered")
+        return int(value) if value is not None else 0
+
+    async def advance_answered(self, key: ConversationKey, message_id: int) -> None:
+        """Mark every customer message up to ``message_id`` answered; never moves backwards."""
+        answered_key = f"{_conversation_prefix(key)}:answered"
+        await self._client.eval(RAISE_TO_MAX, 1, answered_key, message_id, self._limits.transcript_ttl_seconds)
+
+    async def mark_outstanding(self, key: ConversationKey, generation: int) -> None:
+        async with self._client.pipeline(transaction=True) as pipe:
+            pipe.hset(OUTSTANDING_KEY, _field(key), generation)
+            pipe.expire(OUTSTANDING_KEY, self._limits.transcript_ttl_seconds)
+            await pipe.execute()
+
+    async def clear_outstanding(self, key: ConversationKey, generation: int) -> None:
+        """Clear the marker only if no newer message re-marked it meanwhile."""
+        await self._client.eval(DELETE_IF_EQUAL, 1, OUTSTANDING_KEY, _field(key), generation)
+
+    async def outstanding(self) -> list[ConversationKey]:
+        fields = await self._client.hkeys(OUTSTANDING_KEY)
+        return [key for key in map(_parse_field, fields) if key is not None]
+
     def lock(self, key: ConversationKey) -> AbstractAsyncContextManager[object]:
         ttl = self._limits.lock_ttl_seconds
         return self._client.lock(f"{_conversation_prefix(key)}:lock", timeout=ttl, blocking_timeout=ttl)
@@ -96,6 +131,19 @@ class ValkeyStore:
     def _transcript_keys(self, key: ConversationKey) -> tuple[str, str]:
         prefix = _conversation_prefix(key)
         return f"{prefix}:order", f"{prefix}:entries"
+
+
+def _field(key: ConversationKey) -> str:
+    return f"{key.account_id}:{key.conversation_id}"
+
+
+def _parse_field(raw: bytes | str) -> ConversationKey | None:
+    text = raw.decode() if isinstance(raw, bytes) else raw
+    account, _, conversation = text.partition(":")
+    account_id, conversation_id = parse_digits(account), parse_digits(conversation)
+    if account_id is None or conversation_id is None:
+        return None
+    return ConversationKey(account_id, conversation_id)
 
 
 def _decode(message_id: bytes | str, value: bytes | str) -> TranscriptEntry:

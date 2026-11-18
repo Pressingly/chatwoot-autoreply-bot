@@ -10,8 +10,11 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from chatwoot_autoreply_bot.digits import parse_digits
+
 REQUIRED = ("CHATWOOT_BOT_TOKEN", "CHATWOOT_BOT_SECRET", "VALKEY_URL", "LLM_API_KEY", "LLM_MODEL")
 ACCOUNT_PROMPT_PREFIX = "SYSTEM_PROMPT_ACCOUNT_"
+LOCK_MARGIN_SECONDS = 15
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are the customer support assistant for this business, replying to its customers in a chat. "
@@ -63,6 +66,7 @@ class Settings:
     transcript_ttl_seconds: int = 7 * 86400
     chatwoot_timeout_seconds: float = 10.0
     http_port: int = 8000
+    max_body_bytes: int = 1024 * 1024
 
     def prompt_for(self, account_id: int) -> str:
         return self.account_prompts.get(account_id, self.system_prompt)
@@ -72,6 +76,10 @@ class Settings:
         llm_worst_case = self.llm_timeout_seconds * (self.llm_max_retries + 1)
         chatwoot_worst_case = self.chatwoot_timeout_seconds * 6
         return int(llm_worst_case + chatwoot_worst_case) + 30
+
+    @property
+    def turn_timeout_seconds(self) -> float:
+        return self.lock_ttl_seconds - LOCK_MARGIN_SECONDS
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -103,6 +111,7 @@ class Settings:
             transcript_ttl_seconds=int(_positive(env, "TRANSCRIPT_TTL_SECONDS", cls.transcript_ttl_seconds)),
             chatwoot_timeout_seconds=_positive(env, "CHATWOOT_TIMEOUT_SECONDS", cls.chatwoot_timeout_seconds),
             http_port=int(_positive(env, "PORT", cls.http_port)),
+            max_body_bytes=int(_positive(env, "MAX_BODY_BYTES", cls.max_body_bytes)),
         )
 
 
@@ -152,8 +161,8 @@ def _account_prompts(env: Mapping[str, str]) -> dict[int, str]:
     for name, value in env.items():
         if not name.startswith(ACCOUNT_PROMPT_PREFIX) or not value.strip():
             continue
-        suffix = name.removeprefix(ACCOUNT_PROMPT_PREFIX)
-        if not suffix.isdigit():
+        account_id = parse_digits(name.removeprefix(ACCOUNT_PROMPT_PREFIX))
+        if account_id is None:
             raise ConfigError(f"{name}: the suffix must be a numeric Chatwoot account id")
-        prompts[int(suffix)] = value.strip()
+        prompts[account_id] = value.strip()
     return prompts

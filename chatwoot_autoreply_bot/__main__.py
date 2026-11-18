@@ -10,7 +10,7 @@ import uvicorn
 from chatwoot_autoreply_bot.app import create_app
 from chatwoot_autoreply_bot.config import ConfigError, Settings
 
-QUIET_LOGGERS = ("httpx", "httpcore", "openai")
+QUIET_LOGGERS = ("httpx", "httpcore", "httpx2", "httpcore2", "openai")
 
 
 def configure_logging() -> None:

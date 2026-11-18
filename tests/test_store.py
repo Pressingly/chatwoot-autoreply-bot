@@ -73,3 +73,27 @@ async def test_lock_is_exclusive(store: ValkeyStore, valkey) -> None:
 
 async def test_ping(store: ValkeyStore) -> None:
     assert await store.ping()
+
+
+async def test_answered_watermark_only_moves_forward(store: ValkeyStore, valkey) -> None:
+    assert await store.answered_through(KEY) == 0
+    await store.advance_answered(KEY, 5)
+    await store.advance_answered(KEY, 3)
+    assert await store.answered_through(KEY) == 5
+    assert 0 < await valkey.ttl("cwbot:1:42:answered") <= LIMITS.transcript_ttl_seconds
+
+
+async def test_outstanding_is_cleared_only_for_the_latest_generation(store: ValkeyStore) -> None:
+    other = ConversationKey(2, 7)
+    await store.mark_outstanding(KEY, 1)
+    await store.mark_outstanding(other, 1)
+    await store.mark_outstanding(KEY, 2)
+    await store.clear_outstanding(KEY, 1)
+    assert sorted(await store.outstanding(), key=lambda key: key.account_id) == [KEY, other]
+    await store.clear_outstanding(KEY, 2)
+    assert await store.outstanding() == [other]
+
+
+async def test_outstanding_skips_malformed_fields(store: ValkeyStore, valkey) -> None:
+    await valkey.hset("cwbot:outstanding", mapping={"junk": 1, "1:²": 1, "1:42": 1})
+    assert await store.outstanding() == [KEY]
