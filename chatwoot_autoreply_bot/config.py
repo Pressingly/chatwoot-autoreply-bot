@@ -14,6 +14,17 @@ from chatwoot_autoreply_bot.digits import parse_digits
 
 REQUIRED = ("CHATWOOT_BOT_TOKEN", "CHATWOOT_BOT_SECRET", "VALKEY_URL", "LLM_API_KEY", "LLM_MODEL")
 ACCOUNT_PROMPT_PREFIX = "SYSTEM_PROMPT_ACCOUNT_"
+
+# Worst-case reply turn, which the per-conversation lock must outlive:
+# reply path: status, typing on, typing off, status, post (fails) = 5 calls,
+# then the scheduler's handoff: status, note, open x OPEN_ATTEMPTS = 5 calls.
+CHATWOOT_CALLS_PER_TURN = 10
+OPEN_ATTEMPTS = 3
+OPEN_RETRY_SECONDS = 1.0
+OPEN_BACKOFF_SECONDS = OPEN_RETRY_SECONDS * sum(range(1, OPEN_ATTEMPTS))
+LLM_RETRY_SLACK_SECONDS = 10
+VALKEY_OPS_PER_TURN = 12
+VALKEY_OP_WORST_SECONDS = 4
 LOCK_MARGIN_SECONDS = 15
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -72,14 +83,15 @@ class Settings:
         return self.account_prompts.get(account_id, self.system_prompt)
 
     @property
-    def lock_ttl_seconds(self) -> int:
-        llm_worst_case = self.llm_timeout_seconds * (self.llm_max_retries + 1)
-        chatwoot_worst_case = self.chatwoot_timeout_seconds * 6
-        return int(llm_worst_case + chatwoot_worst_case) + 30
+    def llm_budget_seconds(self) -> float:
+        """Hard cap on one LLM call, retries and their backoff included; past it the bot hands off."""
+        return self.llm_timeout_seconds * (self.llm_max_retries + 1) + LLM_RETRY_SLACK_SECONDS
 
     @property
-    def turn_timeout_seconds(self) -> float:
-        return self.lock_ttl_seconds - LOCK_MARGIN_SECONDS
+    def lock_ttl_seconds(self) -> int:
+        chatwoot_worst_case = self.chatwoot_timeout_seconds * CHATWOOT_CALLS_PER_TURN + OPEN_BACKOFF_SECONDS
+        valkey_worst_case = VALKEY_OPS_PER_TURN * VALKEY_OP_WORST_SECONDS
+        return int(self.llm_budget_seconds + chatwoot_worst_case + valkey_worst_case) + LOCK_MARGIN_SECONDS
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:

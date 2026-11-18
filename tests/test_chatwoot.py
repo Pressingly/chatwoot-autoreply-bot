@@ -69,3 +69,16 @@ async def test_build_sets_token_and_base_url() -> None:
     assert client._http.headers["api_access_token"] == "tok"
     assert str(client._http.base_url) == "http://chatwoot:3000"
     await client.aclose()
+
+
+async def test_each_call_is_time_boxed() -> None:
+    import asyncio
+
+    async def hang(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200)
+
+    http = httpx.AsyncClient(base_url="http://chatwoot:3000", transport=httpx.MockTransport(hang))
+    client = ChatwootClient(http, call_timeout_seconds=0.05)
+    with pytest.raises(ChatwootError, match="TimeoutError"):
+        await client.open_conversation(KEY)

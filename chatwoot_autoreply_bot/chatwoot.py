@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -14,8 +15,9 @@ class ChatwootError(RuntimeError):
 
 
 class ChatwootClient:
-    def __init__(self, http: httpx.AsyncClient) -> None:
+    def __init__(self, http: httpx.AsyncClient, call_timeout_seconds: float = 10.0) -> None:
         self._http = http
+        self._call_timeout_seconds = call_timeout_seconds
 
     @classmethod
     def build(cls, base_url: str, bot_token: str, timeout_seconds: float) -> ChatwootClient:
@@ -25,7 +27,7 @@ class ChatwootClient:
             timeout=timeout_seconds,
             follow_redirects=False,
         )
-        return cls(http)
+        return cls(http, timeout_seconds)
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -56,8 +58,9 @@ class ChatwootClient:
 
     async def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         try:
-            response = await self._http.request(method, path, json=body)
-        except httpx.HTTPError as error:
+            async with asyncio.timeout(self._call_timeout_seconds):
+                response = await self._http.request(method, path, json=body)
+        except (httpx.HTTPError, TimeoutError) as error:
             raise ChatwootError(f"{method} {path}: {type(error).__name__}") from error
         if response.is_error:
             raise ChatwootError(f"{method} {path}: HTTP {response.status_code}")

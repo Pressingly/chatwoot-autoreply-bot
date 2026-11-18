@@ -15,6 +15,6 @@ tag and date and start a new **Unreleased** section. Put anything an operator ha
 - First release: a Chatwoot Agent Bot service that verifies signed webhooks on `POST /webhook`, keeps a
   per-conversation transcript in Valkey, debounces bursts into one reply per pending conversation, answers
   through any OpenAI-compatible LLM, and hands off to a human by opening the conversation on request, on the
-  LLM's `[[HANDOFF]]` signal or on failure. Unauthenticated bodies are capped at `MAX_BODY_BYTES`, turns are
-  bounded by the lock lifetime, outstanding turns resume after a restart, and `/healthz` checks Valkey.
+  LLM's `[[HANDOFF]]` signal or on failure. Unauthenticated bodies are capped at `MAX_BODY_BYTES`, the LLM
+  call and every Chatwoot call are time-boxed inside the lock lifetime, outstanding turns resume after a restart, and `/healthz` checks Valkey.
   ([FOSS-725](https://pm.moneta.askii.ai/moneta/browse/FOSS-725/))

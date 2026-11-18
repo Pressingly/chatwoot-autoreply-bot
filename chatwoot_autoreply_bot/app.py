@@ -89,13 +89,13 @@ def build_services(settings: Settings) -> Services:
         prompt_for=settings.prompt_for,
         handoff_message=settings.handoff_message,
         handoff_phrases=settings.handoff_phrases,
+        llm_budget_seconds=settings.llm_budget_seconds,
     )
     scheduler = ReplyScheduler(
         store=store,
         respond=responder.respond,
         hand_off=responder.hand_off,
         debounce_seconds=settings.debounce_seconds,
-        turn_timeout_seconds=settings.turn_timeout_seconds,
     )
     return Services(store, scheduler, [chatwoot.aclose, llm.aclose, valkey.aclose])
 

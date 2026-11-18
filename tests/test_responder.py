@@ -52,6 +52,7 @@ def responder(chatwoot: FakeChatwoot, store: ValkeyStore, llm: FakeLlm) -> Respo
         prompt_for=lambda account_id: f"prompt for {account_id}",
         handoff_message=HANDOFF_NOTE,
         handoff_phrases=PHRASES,
+        llm_budget_seconds=30,
     )
 
 

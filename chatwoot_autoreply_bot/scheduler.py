@@ -2,9 +2,9 @@
 
 Every triggering message bumps the conversation's generation (in Valkey) and starts a
 task that sleeps for the debounce window. Only the task holding the latest generation
-goes on, and it runs under the conversation's Valkey lock, bounded so the lock cannot
-expire mid-turn. A burst of messages yields one reply and two replies never overlap,
-across processes too.
+goes on, and it runs under the conversation's Valkey lock. Every step of a turn is
+bounded (see ``Settings.lock_ttl_seconds``), so the lock outlives the turn. A burst of
+messages yields one reply and two replies never overlap, across processes too.
 
 Each scheduled conversation is marked outstanding until a turn for its latest
 generation finishes. ``resume`` reschedules the marked ones at startup, so turns still
@@ -35,14 +35,12 @@ class ReplyScheduler:
         respond: Respond,
         hand_off: HandOff,
         debounce_seconds: float,
-        turn_timeout_seconds: float,
         sleep: Sleep = asyncio.sleep,
     ) -> None:
         self._store = store
         self._respond = respond
         self._hand_off = hand_off
         self._debounce_seconds = debounce_seconds
-        self._turn_timeout_seconds = turn_timeout_seconds
         self._sleep = sleep
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -90,8 +88,7 @@ class ReplyScheduler:
             async with self._store.lock(key):
                 if await self._superseded(key, generation):
                     return False
-                async with asyncio.timeout(self._turn_timeout_seconds):
-                    await self._respond(key)
+                await self._respond(key)
                 finished = True
         except Exception as error:
             if not finished:

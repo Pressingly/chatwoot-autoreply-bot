@@ -85,7 +85,11 @@ def test_account_prompt_rejects_unicode_or_huge_ids(suffix: str) -> None:
         settings(**{f"SYSTEM_PROMPT_ACCOUNT_{suffix}": "x"})
 
 
-def test_turn_ends_before_the_lock_expires() -> None:
-    result = settings()
-    assert 0 < result.turn_timeout_seconds < result.lock_ttl_seconds
+def test_lock_outlives_the_worst_case_turn_including_handoff_retries() -> None:
+    result = settings(LLM_TIMEOUT_SECONDS="30", LLM_MAX_RETRIES="2", CHATWOOT_TIMEOUT_SECONDS="10")
+    assert result.llm_budget_seconds == 30 * 3 + 10
+    chatwoot_calls = 5 + 2 + 3
+    open_backoff = 1 + 2
+    valkey = 12 * 4
+    assert result.lock_ttl_seconds > result.llm_budget_seconds + chatwoot_calls * 10 + open_backoff + valkey
     assert settings(MAX_BODY_BYTES="2048").max_body_bytes == 2048

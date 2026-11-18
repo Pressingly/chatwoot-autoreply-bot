@@ -20,6 +20,7 @@ def wire(store: ValkeyStore, chatwoot: FakeChatwoot, llm: FakeLlm) -> tuple[Resp
         prompt_for=lambda _: "p",
         handoff_message="H",
         handoff_phrases=(),
+        llm_budget_seconds=30,
         sleep=no_sleep,
     )
     scheduler = ReplyScheduler(
@@ -27,7 +28,6 @@ def wire(store: ValkeyStore, chatwoot: FakeChatwoot, llm: FakeLlm) -> tuple[Resp
         respond=responder.respond,
         hand_off=responder.hand_off,
         debounce_seconds=0,
-        turn_timeout_seconds=30,
     )
     return responder, scheduler
 
@@ -76,3 +76,76 @@ async def test_human_reply_then_new_message_is_not_handed_off_again(store: Valke
     await store.append(KEY, TranscriptEntry(3, "user", "Thanks, one more question"))
     responder._handoff_phrases = ("talk to a person",)
     assert (await responder.respond(KEY)).value == "replied"
+
+
+def delayed(chatwoot: FakeChatwoot, path_suffix: str, seconds: float, times: int = 1) -> None:
+    original = chatwoot.handler
+    remaining = {"n": times}
+
+    async def handler(request):
+        if request.url.path.endswith(path_suffix) and remaining["n"] > 0:
+            remaining["n"] -= 1
+            await asyncio.sleep(seconds)
+        return original(request)
+
+    chatwoot.handler = handler
+
+
+async def test_slow_open_during_handoff_never_reposts_the_note(store: ValkeyStore, chatwoot: FakeChatwoot) -> None:
+    delayed(chatwoot, "/toggle_status", 0.5)
+    responder, scheduler = wire(store, chatwoot, FakeLlm(status=500))
+    responder._llm_budget_seconds = 0.2
+    await store.append(KEY, TranscriptEntry(1, "user", "A"))
+    await scheduler.schedule(KEY)
+    await scheduler.drain()
+    assert chatwoot.posted_messages() == ["H"]
+    assert chatwoot.writes()[-1] == "/toggle_status"
+
+
+async def test_llm_over_budget_is_one_handoff(store: ValkeyStore, chatwoot: FakeChatwoot) -> None:
+    responder, scheduler = wire(store, chatwoot, FakeLlm())
+    responder._llm_budget_seconds = 0.05
+
+    async def hang(messages):
+        await asyncio.sleep(5)
+
+    responder._llm.complete = hang
+    await store.append(KEY, TranscriptEntry(1, "user", "A"))
+    await scheduler.schedule(KEY)
+    await scheduler.drain()
+    assert chatwoot.posted_messages() == ["H"]
+    typing = [body for _, path, body in chatwoot.calls() if path == "/toggle_typing_status"]
+    assert typing == [{"typing_status": "on"}, {"typing_status": "off"}]
+
+
+async def test_slow_post_is_not_cut_by_the_llm_budget(store: ValkeyStore, chatwoot: FakeChatwoot) -> None:
+    delayed(chatwoot, "/messages", 0.3)
+    responder, scheduler = wire(store, chatwoot, FakeLlm("Answer"))
+    responder._llm_budget_seconds = 0.05
+    await store.append(KEY, TranscriptEntry(1, "user", "A"))
+    await scheduler.schedule(KEY)
+    await scheduler.drain()
+    assert chatwoot.posted_messages() == ["Answer"]
+    assert "/toggle_status" not in chatwoot.writes()
+
+
+async def test_kill_right_after_the_post_does_not_reply_again_on_resume(
+    store: ValkeyStore, chatwoot: FakeChatwoot
+) -> None:
+    responder, scheduler = wire(store, chatwoot, FakeLlm("Answer"))
+    post = responder._chatwoot.post_message
+
+    async def post_then_die(key, content):
+        await post(key, content)
+        raise asyncio.CancelledError
+
+    responder._chatwoot.post_message = post_then_die
+    await store.append(KEY, TranscriptEntry(1, "user", "A"))
+    await scheduler.schedule(KEY)
+    await scheduler.drain()
+    assert await store.outstanding() == [KEY]
+
+    _, restarted = wire(store, chatwoot, FakeLlm("Answer"))
+    assert await restarted.resume() == 1
+    await restarted.drain()
+    assert chatwoot.posted_messages() == ["Answer"]

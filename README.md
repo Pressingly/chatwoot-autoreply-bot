@@ -14,12 +14,14 @@ should. It is a separate service that talks to Chatwoot only through its webhook
 3. Only a public, incoming `message_created` in a **pending** conversation triggers a reply. Agent replies, the
    bot's own replies and messages in open conversations only extend the transcript. Private notes are ignored.
 4. Replies are debounced per conversation (`DEBOUNCE_SECONDS`, default 3): a burst of customer messages gets one
-   answer that sees all of them. A per-conversation lock means two replies never run at once, and each turn is cut
-   off before the lock could expire.
+   answer that sees all of them. A per-conversation lock means two replies never run at once. The LLM call is
+   capped at `LLM_TIMEOUT_SECONDS` x (`LLM_MAX_RETRIES` + 1) + 10 s (past that the bot hands off), each Chatwoot
+   call at `CHATWOOT_TIMEOUT_SECONDS`, and the lock lasts longer than the worst case of all of them.
 5. Before answering, the bot re-reads the conversation status and stays silent unless it is still pending. It
    shows typing, calls the LLM with the system prompt plus the transcript, checks the status again, and posts.
-6. The bot remembers the newest customer message each reply (or handoff, or human agent reply) has answered.
-   A message that arrives while the LLM is still working gets its own reply right after.
+6. The bot remembers the newest customer message each reply (or handoff, or human agent reply) has answered,
+   writing that down just before it posts. A message that arrives while the LLM is still working gets its own
+   reply right after.
 
 ### Handoff
 
@@ -95,8 +97,9 @@ docker run --env-file bot.env -p 8000:8000 chatwoot-autoreply-bot
 - One replica is enough. Generations, locks and the answered marker live in Valkey, so more replicas do not
   answer twice; each process runs one worker.
 - Conversations with a reply still to come are listed in Valkey; on startup the bot reschedules them, so turns
-  waiting or running when it stopped are picked up again. A turn killed after posting but before recording the
-  reply can be answered twice; a turn killed mid-handoff can leave the note without the open.
+  waiting or running when it stopped are picked up again without answering twice. A turn killed between marking
+  its messages answered and posting leaves them unanswered until the customer writes again; a turn killed
+  mid-handoff can leave the note without the open.
 - Valkey evicting keys (an `allkeys-lru` policy) can drop a transcript or those markers: that shortens the
   bot's context, or skips a resume.
 

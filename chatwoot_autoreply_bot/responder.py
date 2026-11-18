@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from enum import StrEnum
 
 from chatwoot_autoreply_bot.chatwoot import ChatwootClient, ChatwootError
+from chatwoot_autoreply_bot.config import OPEN_ATTEMPTS, OPEN_RETRY_SECONDS
 from chatwoot_autoreply_bot.events import ConversationKey, TranscriptEntry
 from chatwoot_autoreply_bot.llm import LlmClient, LlmError, build_messages, decide
 from chatwoot_autoreply_bot.store import ValkeyStore
@@ -16,8 +17,6 @@ from chatwoot_autoreply_bot.store import ValkeyStore
 log = logging.getLogger(__name__)
 
 BOT_STATUS = "pending"
-OPEN_ATTEMPTS = 3
-OPEN_RETRY_SECONDS = 1.0
 
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -53,6 +52,7 @@ class Responder:
         prompt_for: Callable[[int], str],
         handoff_message: str,
         handoff_phrases: Sequence[str],
+        llm_budget_seconds: float,
         sleep: Sleep = asyncio.sleep,
     ) -> None:
         self._chatwoot = chatwoot
@@ -61,6 +61,7 @@ class Responder:
         self._prompt_for = prompt_for
         self._handoff_message = handoff_message
         self._handoff_phrases = handoff_phrases
+        self._llm_budget_seconds = llm_budget_seconds
         self._sleep = sleep
 
     async def respond(self, key: ConversationKey) -> Outcome:
@@ -75,8 +76,7 @@ class Responder:
             return await self.hand_off(key, reason="customer_request", answered_through=through)
         messages = build_messages(self._prompt_for(key.account_id), llm_context(transcript, unanswered))
         try:
-            async with self._typing(key):
-                completion = await self._llm.complete(messages)
+            completion = await self._complete(key, messages)
         except LlmError as error:
             log.warning("llm failed account=%s conversation=%s error=%s", *_ids(key), error)
             return await self.hand_off(key, reason="llm_error", answered_through=through)
@@ -85,23 +85,33 @@ class Responder:
             return await self.hand_off(key, reason="llm_handoff", answered_through=through)
         if not await self._bot_owns(key):
             return Outcome.SKIPPED
+        await self._advance_quietly(key, through)
         message_id = await self._chatwoot.post_message(key, decision.text)
         log.info("replied account=%s conversation=%s", *_ids(key))
-        await self._record_reply(key, through, message_id, decision.text)
+        await self._record_reply(key, message_id, decision.text)
         return Outcome.REPLIED
+
+    async def _complete(self, key: ConversationKey, messages: list[dict[str, str]]) -> str:
+        """Only the LLM call is time-boxed, so running out of time is an LLM failure and never cuts a post short."""
+        async with self._typing(key):
+            try:
+                async with asyncio.timeout(self._llm_budget_seconds):
+                    return await self._llm.complete(messages)
+            except TimeoutError as error:
+                raise LlmError("TimeoutError") from error
 
     async def hand_off(self, key: ConversationKey, *, reason: str, answered_through: int | None = None) -> Outcome:
         """Post the note once and open the conversation. Never raises, so a caller never posts the note twice."""
         try:
             if await self._bot_released(key):
                 return Outcome.SKIPPED
+            if answered_through is not None:
+                await self._advance_quietly(key, answered_through)
             await self._post_handoff_note(key)
             opened = await self._open(key)
         except Exception as error:
             log.error("handoff failed account=%s conversation=%s error=%s", *_ids(key), type(error).__name__)
             return Outcome.HANDOFF_FAILED
-        if answered_through is not None:
-            await self._advance_quietly(key, answered_through)
         if not opened:
             return Outcome.HANDOFF_FAILED
         log.info("handed off account=%s conversation=%s reason=%s", *_ids(key), reason)
@@ -125,9 +135,8 @@ class Responder:
         log.error("conversation left pending after handoff account=%s conversation=%s", *_ids(key))
         return False
 
-    async def _record_reply(self, key: ConversationKey, through: int, message_id: int | None, text: str) -> None:
+    async def _record_reply(self, key: ConversationKey, message_id: int | None, text: str) -> None:
         """Best effort once the reply is out: a failure here must not turn into a handoff."""
-        await self._advance_quietly(key, through)
         if message_id is None:
             return
         try:

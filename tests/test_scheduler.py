@@ -38,7 +38,6 @@ def scheduler(store: ValkeyStore, recorder: Recorder, debounce: float = 0.05) ->
         respond=recorder.respond,
         hand_off=recorder.hand_off,
         debounce_seconds=debounce,
-        turn_timeout_seconds=30,
     )
 
 
@@ -98,9 +97,7 @@ async def test_failed_handoff_is_contained(store: ValkeyStore) -> None:
         raise RuntimeError("chatwoot down")
 
     recorder = Recorder(fail=True)
-    replies = ReplyScheduler(
-        store=store, respond=recorder.respond, hand_off=broken_hand_off, debounce_seconds=0, turn_timeout_seconds=30
-    )
+    replies = ReplyScheduler(store=store, respond=recorder.respond, hand_off=broken_hand_off, debounce_seconds=0)
     await replies.schedule(KEY)
     await replies.drain()
 
@@ -125,7 +122,6 @@ async def test_lock_lost_after_the_reply_is_not_a_handoff(store: ValkeyStore, va
         respond=respond_then_lose_lock,
         hand_off=recorder.hand_off,
         debounce_seconds=0,
-        turn_timeout_seconds=30,
     )
     await replies.schedule(KEY)
     await replies.drain()
@@ -156,18 +152,6 @@ async def test_turn_superseded_while_waiting_for_the_lock_never_responds(store: 
         await asyncio.sleep(0.02)
     await replies.drain()
     assert recorder.responded == [KEY]
-
-
-async def test_turn_longer_than_the_lock_allows_is_cut_and_handed_off(store: ValkeyStore, valkey) -> None:
-    recorder = Recorder(delay=5)
-    replies = ReplyScheduler(
-        store=store, respond=recorder.respond, hand_off=recorder.hand_off, debounce_seconds=0, turn_timeout_seconds=0.05
-    )
-    await replies.schedule(KEY)
-    await replies.drain()
-    assert recorder.responded == []
-    assert recorder.handoffs == [(KEY, "reply_error")]
-    assert not await valkey.exists("cwbot:1:42:lock")
 
 
 async def test_finished_turn_clears_its_outstanding_marker(store: ValkeyStore) -> None:

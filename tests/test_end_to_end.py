@@ -26,13 +26,13 @@ async def test_burst_of_customer_messages_gets_one_reply_with_full_context(
         prompt_for=lambda _: "Acme support.",
         handoff_message="handoff",
         handoff_phrases=(),
+        llm_budget_seconds=30,
     )
     scheduler = ReplyScheduler(
         store=store,
         respond=responder.respond,
         hand_off=responder.hand_off,
         debounce_seconds=0.05,
-        turn_timeout_seconds=30,
     )
     app = create_app(SETTINGS, lambda _: Services(store, scheduler), clock=lambda: NOW)
 
