@@ -75,10 +75,18 @@ class Responder:
         if not await self._bot_owns(key):
             return Outcome.SKIPPED
         message_id = await self._chatwoot.post_message(key, decision.text)
-        if message_id is not None:
-            await self._store.append(key, TranscriptEntry(message_id, "assistant", decision.text))
         log.info("replied account=%s conversation=%s", *_ids(key))
+        await self._record_reply(key, message_id, decision.text)
         return Outcome.REPLIED
+
+    async def _record_reply(self, key: ConversationKey, message_id: int | None, text: str) -> None:
+        """Best effort: the webhook echo of the reply records it too."""
+        if message_id is None:
+            return
+        try:
+            await self._store.append(key, TranscriptEntry(message_id, "assistant", text))
+        except Exception as error:
+            log.warning("reply not recorded account=%s conversation=%s error=%s", *_ids(key), type(error).__name__)
 
     async def hand_off(self, key: ConversationKey, *, reason: str) -> Outcome:
         if await self._bot_released(key):

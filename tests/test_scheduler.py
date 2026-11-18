@@ -103,3 +103,32 @@ async def test_close_cancels_waiting_turns(store: ValkeyStore) -> None:
     await replies.schedule(KEY)
     await replies.aclose()
     assert recorder.responded == []
+
+
+async def test_lock_lost_after_the_reply_is_not_a_handoff(store: ValkeyStore, valkey) -> None:
+    recorder = Recorder()
+
+    async def respond_then_lose_lock(key: ConversationKey) -> None:
+        await recorder.respond(key)
+        await valkey.delete("cwbot:1:42:lock")
+
+    replies = ReplyScheduler(
+        store=store, respond=respond_then_lose_lock, hand_off=recorder.hand_off, debounce_seconds=0
+    )
+    await replies.schedule(KEY)
+    await replies.drain()
+    assert recorder.responded == [KEY]
+    assert recorder.handoffs == []
+
+
+async def test_lock_timeout_before_the_reply_hands_off(store: ValkeyStore) -> None:
+    class LockFails(ValkeyStore):
+        def lock(self, key):
+            raise TimeoutError("lock busy")
+
+    recorder = Recorder()
+    replies = scheduler(LockFails(store._client, store._limits), recorder, debounce=0)
+    await replies.schedule(KEY)
+    await replies.drain()
+    assert recorder.responded == []
+    assert recorder.handoffs == [(KEY, "reply_error")]

@@ -159,3 +159,16 @@ async def test_handoff_proceeds_when_the_status_is_unknown(chatwoot: FakeChatwoo
     chatwoot.fail_paths.add("")
     assert await responder(chatwoot, store, FakeLlm()).hand_off(KEY, reason="test") is Outcome.HANDED_OFF
     assert chatwoot.writes() == ["/messages", "/toggle_status"]
+
+
+async def test_failing_to_record_the_reply_does_not_undo_it(chatwoot: FakeChatwoot, store: ValkeyStore) -> None:
+    class AppendFails(ValkeyStore):
+        async def append(self, key, entry) -> None:
+            raise ConnectionError("valkey evicted")
+
+    seeded = AppendFails(store._client, store._limits)
+    await store.append(KEY, TranscriptEntry(1, "user", "Hi"))
+
+    assert await responder(chatwoot, seeded, FakeLlm()).respond(KEY) is Outcome.REPLIED
+    assert chatwoot.posted_messages() == ["Happy to help!"]
+    assert "/toggle_status" not in chatwoot.writes()

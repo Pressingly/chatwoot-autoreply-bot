@@ -61,14 +61,29 @@ class ReplyScheduler:
             await self._sleep(self._debounce_seconds)
             if await self._superseded(key, generation):
                 return
-            async with self._store.lock(key):
-                if await self._superseded(key, generation):
-                    return
-                await self._respond(key)
+            await self._locked_turn(key, generation)
         except asyncio.CancelledError:
             raise
         except Exception as error:
             await self._hand_off_after_failure(key, error)
+
+    async def _locked_turn(self, key: ConversationKey, generation: int) -> None:
+        finished = False
+        try:
+            async with self._store.lock(key):
+                if await self._superseded(key, generation):
+                    return
+                await self._respond(key)
+                finished = True
+        except Exception as error:
+            if not finished:
+                raise
+            log.warning(
+                "lock release failed account=%s conversation=%s error=%s",
+                key.account_id,
+                key.conversation_id,
+                type(error).__name__,
+            )
 
     async def _superseded(self, key: ConversationKey, generation: int) -> bool:
         return await self._store.generation(key) != generation
