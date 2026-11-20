@@ -8,6 +8,7 @@ import httpx
 import pytest
 from fakeredis import FakeAsyncRedis
 
+from chatwoot_autoreply_bot.config import DEFAULT_LLM_BASE_URL_ALLOWLIST
 from chatwoot_autoreply_bot.events import TranscriptEntry
 from chatwoot_autoreply_bot.keystore import InboxKeyStore, KeyCipher
 from chatwoot_autoreply_bot.llm import LlmClient, LlmCredentials
@@ -18,6 +19,7 @@ from tests.helpers import FERNET_KEY, INBOX_ID, KEY, FakeChatwoot
 from tests.test_responder import HANDOFF_NOTE, PHRASES, FakeLlm, no_sleep
 
 CONNECT_URL = "https://chatwoot-autoreply.example.com/connect"
+ALLOWED_HOSTS = frozenset(DEFAULT_LLM_BASE_URL_ALLOWLIST)
 PASTED = LlmCredentials("https://api.openai.com/v1", "inbox-model", "sk-inbox-0000000000")
 
 
@@ -52,6 +54,7 @@ def responder(
         keystore=keystore,
         fallback=fallback.client() if fallback else None,
         connect_url=CONNECT_URL,
+        allowed_hosts=ALLOWED_HOSTS,
     )
     bot = Responder(
         sleep=no_sleep,
@@ -175,3 +178,18 @@ async def test_failed_private_note_still_opens(chatwoot: FakeChatwoot, store: Va
     bot, _ = responder(chatwoot, store, keystore=None)
     assert await bot.hand_off(KEY, reason="test", note="note") is Outcome.HANDED_OFF
     assert chatwoot.writes()[-1] == "/toggle_status"
+
+
+async def test_stored_key_on_a_disallowed_host_hands_off_with_a_reconnect_note(
+    chatwoot: FakeChatwoot, store: ValkeyStore, keystore: InboxKeyStore
+) -> None:
+    await keystore.save(INBOX_ID, LlmCredentials("https://llm.retired.example/v1", "m", "sk-x"), set_by="1", set_at=1)
+    await customer_says_hi(store)
+    bot, clients = responder(chatwoot, store, keystore=keystore, fallback=FakeLlm("Env reply"))
+
+    assert await bot.respond(KEY) is Outcome.HANDED_OFF
+    assert clients.built == []
+    assert chatwoot.private_notes() == [
+        "The stored LLM key for this inbox uses a provider host that is no longer allowed. "
+        f"An allowed admin can reconnect it at {CONNECT_URL}."
+    ]

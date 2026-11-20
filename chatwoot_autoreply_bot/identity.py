@@ -5,14 +5,20 @@ which strips any client-supplied copy first. It is normalised like Chatwoot's
 ``lib/mpass/proxy_identity.rb``: Moneta sends the bare mPass id (cognito:username),
 other pools a real email, and Chatwoot synthesises ``<id>@<DEFAULT_EMAIL_DOMAIN>``
 from a bare id, so an allowlist entry in any of those forms matches the others.
+
+With email capture on, the email header carries the user's real address and the
+mPass id arrives in ``X-Auth-Request-Preferred-Username`` (same edge, same strip),
+so an all-digit value there adds the bare id and its synthetic email as aliases.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 EMAIL_IDENTITY_LABEL = "email-identity"
+BARE_MPASS_ID = re.compile(r"[0-9]+")
 
 
 def normalise(value: str | None) -> str:
@@ -25,6 +31,24 @@ def is_email_shaped(value: str) -> bool:
     if at <= 0:
         return False
     return value.find(".", at + 1) > at + 1
+
+
+def bare_mpass_id(value: str | None) -> str | None:
+    """Only an all-digit value is an mPass id; elsewhere the claim can be a display name or a Cognito sub."""
+    candidate = normalise(value)
+    return candidate if BARE_MPASS_ID.fullmatch(candidate) else None
+
+
+@dataclass(frozen=True)
+class Identity:
+    """The verified ``X-Auth-Request-Email`` value, plus the mPass id when the edge sends one separately."""
+
+    email: str
+    mpass_id: str | None = None
+
+    @classmethod
+    def from_headers(cls, email: str | None, preferred_username: str | None) -> Identity:
+        return cls(normalise(email), bare_mpass_id(preferred_username))
 
 
 @dataclass(frozen=True)
@@ -56,9 +80,13 @@ class AdminAllowlist:
         synthetic = {f"{mpass_id}@{self.default_email_domain}"} if self.default_email_domain else set()
         return frozenset({identity, mpass_id, *synthetic})
 
-    def permits(self, identity: str) -> bool:
-        return bool(identity) and not self.aliases(identity).isdisjoint(self.entries)
+    def identity_aliases(self, identity: Identity) -> frozenset[str]:
+        extra = self.aliases(identity.mpass_id) if identity.mpass_id else frozenset()
+        return self.aliases(identity.email) | extra
 
-    def actor_label(self, identity: str) -> str:
+    def permits(self, identity: Identity) -> bool:
+        return bool(identity.email) and not self.identity_aliases(identity).isdisjoint(self.entries)
+
+    def actor_label(self, identity: Identity) -> str:
         """What logs and the key record show for this person: the mPass id, never an email."""
-        return self.mpass_id(identity) or EMAIL_IDENTITY_LABEL
+        return identity.mpass_id or self.mpass_id(identity.email) or EMAIL_IDENTITY_LABEL

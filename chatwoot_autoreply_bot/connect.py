@@ -24,13 +24,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from chatwoot_autoreply_bot.bodies import BodyTooLarge, read_limited_body
 from chatwoot_autoreply_bot.connect_form import FormError, parse_connect_form, parse_inbox_id
 from chatwoot_autoreply_bot.connect_page import PageView, render_connect_page, render_notice
-from chatwoot_autoreply_bot.identity import AdminAllowlist, normalise
+from chatwoot_autoreply_bot.identity import AdminAllowlist, Identity
 from chatwoot_autoreply_bot.keystore import InboxKeyStore
 from chatwoot_autoreply_bot.llm import LlmCredentials
 
 log = logging.getLogger(__name__)
 
 IDENTITY_HEADER = "X-Auth-Request-Email"
+MPASS_ID_HEADER = "X-Auth-Request-Preferred-Username"
 EDGE_SECRET_HEADER = "X-Mpass-Edge-Secret"
 CSRF_COOKIE = "__Host-cwbot_csrf"
 CSRF_FIELD = "csrf_token"
@@ -48,6 +49,7 @@ SECURITY_HEADERS = {
 
 CredentialCheck = Callable[[LlmCredentials], Awaitable[str | None]]
 Clock = Callable[[], float]
+KEYSTORE_UNAVAILABLE = "The key store is unavailable. Try again shortly."
 
 
 class Refused(Exception):
@@ -101,7 +103,7 @@ async def _show(request: Request, deps: ConnectDeps) -> Response:
 
 
 async def _save(request: Request, deps: ConnectDeps) -> Response:
-    actor = deps.allowlist.actor_label(_require_admin(request, deps.allowlist, deps.edge_secret))
+    actor = _require_admin(request, deps.allowlist, deps.edge_secret)
     fields = await _verified_form(request, deps.public_origin)
     token = fields[CSRF_FIELD]
     try:
@@ -112,7 +114,10 @@ async def _save(request: Request, deps: ConnectDeps) -> Response:
     if problem is not None:
         log.info("llm key check failed mpass_id=%s inbox=%s host=%s", actor, connect.inbox_id, connect.credentials.host)
         return await _page(request, deps, token, error=problem, values=fields, status=422)
-    await deps.keystore_of(request).save(connect.inbox_id, connect.credentials, set_by=actor, set_at=deps.clock())
+    keystore = deps.keystore_of(request)
+    await _from_keystore(
+        "write", lambda: keystore.save(connect.inbox_id, connect.credentials, set_by=actor, set_at=deps.clock())
+    )
     log.info(
         "llm key saved mpass_id=%s inbox=%s host=%s model=%s",
         actor,
@@ -124,15 +129,15 @@ async def _save(request: Request, deps: ConnectDeps) -> Response:
 
 
 async def _delete(request: Request, deps: ConnectDeps, raw_inbox_id: str) -> Response:
-    actor = deps.allowlist.actor_label(_require_admin(request, deps.allowlist, deps.edge_secret))
+    actor = _require_admin(request, deps.allowlist, deps.edge_secret)
     fields = await _verified_form(request, deps.public_origin)
     try:
         inbox_id = parse_inbox_id(raw_inbox_id)
     except FormError as error:
         return await _page(request, deps, fields[CSRF_FIELD], error=str(error), status=422)
     keystore = deps.keystore_of(request)
-    removed = await keystore.connection(inbox_id)
-    await keystore.delete(inbox_id)
+    removed = await _from_keystore("read", lambda: keystore.connection(inbox_id))
+    await _from_keystore("write", lambda: keystore.delete(inbox_id))
     log.info(
         "llm key deleted mpass_id=%s inbox=%s host=%s model=%s",
         actor,
@@ -144,16 +149,18 @@ async def _delete(request: Request, deps: ConnectDeps, raw_inbox_id: str) -> Res
 
 
 def _require_admin(request: Request, allowlist: AdminAllowlist, edge_secret: str) -> str:
+    """The admin's actor label (mPass id, never an email) once the edge, identity and allowlist checks pass."""
     if not _came_through_edge(request, edge_secret):
         log.warning("connect denied reason=edge_secret")
         raise Refused(401, "Sign in through mPass to manage auto-reply keys.")
-    identity = normalise(request.headers.get(IDENTITY_HEADER))
-    if not identity:
+    identity = Identity.from_headers(request.headers.get(IDENTITY_HEADER), request.headers.get(MPASS_ID_HEADER))
+    if not identity.email:
         raise Refused(401, "Sign in through mPass to manage auto-reply keys.")
+    actor = allowlist.actor_label(identity)
     if not allowlist.permits(identity):
-        log.warning("connect denied mpass_id=%s", allowlist.actor_label(identity))
+        log.warning("connect denied mpass_id=%s", actor)
         raise Refused(403, "Your account is not allowed to manage auto-reply LLM keys.")
-    return identity
+    return actor
 
 
 def _came_through_edge(request: Request, edge_secret: str) -> bool:
@@ -212,11 +219,8 @@ async def _page(
     status: int = 200,
 ) -> Response:
     keystore = deps.keystore_of(request)
-    try:
-        connections, inboxes = await keystore.connections(), await keystore.inboxes()
-    except Exception as failure:
-        log.error("keystore read failed error=%s", type(failure).__name__)
-        raise Refused(503, "The key store is unavailable. Try again shortly.") from failure
+    connections = await _from_keystore("read", keystore.connections)
+    inboxes = await _from_keystore("read", keystore.inboxes)
     view = PageView(
         csrf_token=csrf_token,
         allowed_hosts=deps.allowed_hosts,
@@ -228,3 +232,12 @@ async def _page(
     response = HTMLResponse(render_connect_page(view), status_code=status)
     response.set_cookie(CSRF_COOKIE, csrf_token, path="/", secure=True, httponly=True, samesite="strict")
     return response
+
+
+async def _from_keystore[T](operation: str, call: Callable[[], Awaitable[T]]) -> T:
+    """A keystore outage becomes a 503 page with the security headers; only the error class is logged."""
+    try:
+        return await call()
+    except Exception as failure:
+        log.error("keystore %s failed error=%s", operation, type(failure).__name__)
+        raise Refused(503, KEYSTORE_UNAVAILABLE) from failure

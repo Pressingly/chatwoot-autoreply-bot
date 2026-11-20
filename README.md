@@ -35,7 +35,7 @@ The bot posts `HANDOFF_MESSAGE` and sets the conversation to **open**, so it lan
 
 When the reason is an LLM key problem, the bot also posts a **private note** for the agents: the inbox has no key
 (with a link to `<PUBLIC_BASE_URL>/connect`), the provider rejected the key or model (401, 403 or 404, never
-retried), or the stored key cannot be read.
+retried), the stored key cannot be read, or its host is no longer on `LLM_BASE_URL_ALLOWLIST`.
 
 The note is posted once; opening the conversation is retried three times. If every attempt fails the bot logs an
 error and the conversation stays pending.
@@ -110,7 +110,11 @@ the `LLM_API_KEY` fallback, otherwise a handoff with a private note pointing at 
   must route `/connect` through mpass-auth and strip client-supplied `X-Auth-Request-*` headers first; the bot
   trusts the header and reads it nowhere else. No header gives 401, an identity not on the list gives 403. The
   value is normalised like Chatwoot's mPass patch (trimmed, lowercased, email shape checked without a regex), and
-  `1234`, `1234@<DEFAULT_EMAIL_DOMAIN>` match each other on either side.
+  `1234`, `1234@<DEFAULT_EMAIL_DOMAIN>` match each other on either side. With email capture on, the email header
+  carries the user's real address and the mPass id arrives in `X-Auth-Request-Preferred-Username` (same edge,
+  same strip); when that value is all ASCII digits it is matched as a bare mPass id too, so a list of bare ids
+  works on both kinds of host. Any other value there (a display name, a Cognito sub) is ignored, and the email
+  header is still required.
 - **Listing.** Inboxes are learned from webhook payloads (`inbox.id`, `inbox.name`); any other inbox id can be
   typed in. Each connected inbox shows the provider host, model, the key's last four characters (only for keys of
   12 characters or more), who set it and when. The key itself is never shown or logged.
@@ -118,12 +122,15 @@ the `LLM_API_KEY` fallback, otherwise a handoff with a private note pointing at 
   key is checked with one small completion (no retries, at most 15 s) before it is stored; an auth or model error
   is shown without the provider's own text. The key is encrypted with `KEY_ENCRYPTION_KEY` together with its
   inbox id, base URL and model, so a stored record cannot be moved to another inbox or pointed at another host.
+  The host is checked against `LLM_BASE_URL_ALLOWLIST` again on every reply: a key whose host has since left the
+  list is not used (the conversation hands off with a reconnect note) and the page marks it "host no longer
+  allowed, reconnect". The env `LLM_BASE_URL` is operator-set and not checked. LLM calls never follow redirects.
 - **Edge secret.** Every `/connect` request must carry `X-Mpass-Edge-Secret` equal to `CONNECT_EDGE_SECRET`
   (constant-time compare); without it the identity header is ignored and the request gets a 401.
 - **CSRF.** Every POST needs the `__Host-cwbot_csrf` cookie token in the form and an `Origin` (or `Referer`)
   equal to `PUBLIC_BASE_URL`. Pages are sent `no-store` with `frame-ancestors 'none'`.
-- **Audit.** Saves and deletes log the mPass id, inbox id, provider host and model. An admin listed by a real
-  email is logged and recorded as `email-identity`.
+- **Audit.** Saves and deletes log the mPass id, inbox id, provider host and model. An admin known only by a
+  real email (no mPass id in either header) is logged and recorded as `email-identity`.
 - **Clients.** One client per inbox and key; a replaced or deleted key's client closes after any reply still
   using it.
 

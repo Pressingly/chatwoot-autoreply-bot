@@ -355,3 +355,85 @@ async def test_default_key_check_probes_once_with_a_short_timeout(
     assert credentials.api_key == API_KEY
     assert limits.max_retries == 0
     assert limits.timeout == 15
+
+
+async def test_stored_key_on_a_host_no_longer_allowed_is_flagged(page: Page) -> None:
+    retired = LlmCredentials("https://llm.retired.example/v1", "gpt-old", API_KEY)
+    await page.keystore.save(5, retired, set_by=ADMIN, set_at=1)
+    await page.post()
+    html = (await page.get()).text
+    assert "llm.retired.example (host no longer allowed, reconnect)" in html
+    assert "api.openai.com (host no longer allowed" not in html
+
+
+class FailingWrites(InboxKeyStore):
+    async def save(self, *args, **kwargs) -> None:
+        raise ConnectionError(f"down {API_KEY}")
+
+    async def delete(self, inbox_id: int) -> bool:
+        raise ConnectionError(f"down {API_KEY}")
+
+
+class FailingLookup(InboxKeyStore):
+    async def connection(self, inbox_id: int):
+        raise ConnectionError(f"down {API_KEY}")
+
+
+@pytest.mark.parametrize(
+    ("keystore_class", "path", "fields"),
+    [
+        (FailingWrites, "/connect", None),
+        (FailingWrites, "/connect/3/delete", {}),
+        (FailingLookup, "/connect/3/delete", {}),
+    ],
+)
+async def test_keystore_outage_on_save_or_delete_is_a_503_page(
+    store: ValkeyStore,
+    valkey: FakeAsyncRedis,
+    check: KeyCheck,
+    caplog: pytest.LogCaptureFixture,
+    keystore_class: type[InboxKeyStore],
+    path: str,
+    fields: dict[str, str] | None,
+) -> None:
+    caplog.set_level(logging.INFO)
+    async for page in page_for(CONNECT_SETTINGS, store, keystore_class(valkey, KeyCipher(FERNET_KEY)), check):
+        response = await page.post(path, fields=fields)
+    assert response.status_code == 503
+    assert "key store is unavailable" in response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["content-security-policy"] == SECURITY_HEADERS["Content-Security-Policy"]
+    assert "error=ConnectionError" in caplog.text
+    assert API_KEY not in caplog.text
+
+
+REAL_EMAIL = "admin@realdomain.example"
+
+
+def _capture_on(preferred_username: str) -> dict[str, str]:
+    return {"X-Auth-Request-Preferred-Username": preferred_username}
+
+
+async def test_capture_on_admin_matches_by_mpass_id_and_is_audited_by_it(
+    page: Page, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    token = await page.token()
+    response = await page.post(identity=REAL_EMAIL, token=token, extra_headers=_capture_on(ADMIN))
+    assert response.status_code == 303
+    assert (await page.keystore.connections())[0].set_by == ADMIN
+    assert f"mpass_id={ADMIN} inbox=3" in caplog.text
+    assert REAL_EMAIL not in caplog.text
+
+
+@pytest.mark.parametrize("preferred_username", ["Admin Person", "3f2b1c9e-8d7a-4e6f-9b0a-1c2d3e4f5a6b", f"{ADMIN}x"])
+async def test_preferred_username_that_is_not_a_bare_id_does_not_grant_access(
+    page: Page, preferred_username: str
+) -> None:
+    headers = {**_identity(REAL_EMAIL), **_capture_on(preferred_username)}
+    assert (await page.client.get("/connect", headers=headers)).status_code == 403
+
+
+async def test_preferred_username_without_the_email_header_is_401(page: Page) -> None:
+    headers = {**_identity(None), **_capture_on(ADMIN)}
+    assert (await page.client.get("/connect", headers=headers)).status_code == 401

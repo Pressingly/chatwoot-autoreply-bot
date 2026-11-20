@@ -110,6 +110,7 @@ def build_services(settings: Settings) -> Services:
         keystore=keystore,
         fallback=fallback_llm(settings),
         connect_url=settings.connect_url,
+        allowed_hosts=settings.llm_base_url_allowlist,
     )
     responder = Responder(
         chatwoot=chatwoot,

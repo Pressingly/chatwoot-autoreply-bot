@@ -5,12 +5,14 @@ import asyncio
 import pytest
 from fakeredis import FakeAsyncRedis
 
+from chatwoot_autoreply_bot.config import DEFAULT_LLM_BASE_URL_ALLOWLIST
 from chatwoot_autoreply_bot.keystore import KEYS_HASH, InboxKeyStore, KeyCipher
 from chatwoot_autoreply_bot.llm import LlmClient, LlmCredentials
 from chatwoot_autoreply_bot.llm_router import FALLBACK_REJECTED_NOTE, KEYSTORE_ERROR_NOTE, LlmRouter, LlmUnavailable
 from tests.helpers import FERNET_KEY
 
 CONNECT_URL = "https://chatwoot-autoreply.example.com/connect"
+ALLOWED_HOSTS = frozenset(DEFAULT_LLM_BASE_URL_ALLOWLIST)
 FIRST = LlmCredentials("https://api.openai.com/v1", "gpt-a", "sk-first-0000000000")
 SECOND = LlmCredentials("https://api.openai.com/v1", "gpt-a", "sk-second-111111111")
 
@@ -42,12 +44,18 @@ def keystore(valkey: FakeAsyncRedis) -> InboxKeyStore:
     return InboxKeyStore(valkey, KeyCipher(FERNET_KEY))
 
 
-def router(keystore: InboxKeyStore | None, factory: Factory, fallback: StubClient | None = None) -> LlmRouter:
+def router(
+    keystore: InboxKeyStore | None,
+    factory: Factory,
+    fallback: StubClient | None = None,
+    allowed_hosts: frozenset[str] = ALLOWED_HOSTS,
+) -> LlmRouter:
     return LlmRouter(
         client_factory=factory,
         keystore=keystore,
         fallback=fallback,  # type: ignore[arg-type]
         connect_url=CONNECT_URL,
+        allowed_hosts=allowed_hosts,
     )
 
 
@@ -223,3 +231,88 @@ async def test_turns_racing_a_slow_close_share_one_new_client(keystore: InboxKey
     assert built[0].closed == 1
     await llms.aclose()
     assert built[1].closed == 1
+
+
+async def test_stored_key_on_a_host_no_longer_allowed_is_refused_with_a_reconnect_note(
+    keystore: InboxKeyStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    factory = Factory()
+    await save(keystore, 3, FIRST)
+    narrowed = router(keystore, factory, StubClient(), allowed_hosts=frozenset({"api.askii.ai"}))
+    with pytest.raises(LlmUnavailable) as raised:
+        async with narrowed.lease(3):
+            pass
+    assert raised.value.reason == "host_not_allowed"
+    assert raised.value.note == (
+        "The stored LLM key for this inbox uses a provider host that is no longer allowed. "
+        f"An allowed admin can reconnect it at {CONNECT_URL}."
+    )
+    assert factory.built == []
+    assert "host=api.openai.com" in caplog.text
+    assert FIRST.api_key not in caplog.text
+
+
+class GatedKeystore(InboxKeyStore):
+    """Holds the next credentials read until the test releases it, to interleave turns deterministically."""
+
+    def __init__(self, inner: InboxKeyStore) -> None:
+        self._inner = inner
+        self.reading = asyncio.Event()
+        self.release = asyncio.Event()
+        self.gate_next = False
+
+    async def credentials(self, inbox_id: int) -> LlmCredentials | None:
+        value = await self._inner.credentials(inbox_id)
+        if self.gate_next:
+            self.gate_next = False
+            self.reading.set()
+            await self.release.wait()
+        return value
+
+
+async def stale_turn_after(keystore: InboxKeyStore, change) -> tuple[Factory, LlmRouter, list[LlmClient]]:
+    gated = GatedKeystore(keystore)
+    factory = Factory()
+    llms = router(gated, factory, StubClient())
+    used: list[LlmClient] = []
+
+    async def turn() -> None:
+        async with llms.lease(3) as source:
+            used.append(source.client)
+
+    await save(keystore, 3, FIRST)
+    gated.gate_next = True
+    stale = asyncio.create_task(turn())
+    await gated.reading.wait()
+    await change(keystore)
+    await turn()
+    gated.release.set()
+    await stale
+    return factory, llms, used
+
+
+async def test_turn_that_read_a_key_before_its_delete_never_caches_it(keystore: InboxKeyStore) -> None:
+    async def delete(store: InboxKeyStore) -> None:
+        await store.delete(3)
+
+    factory, llms, used = await stale_turn_after(keystore, delete)
+    assert llms._leases == {}
+    assert len(factory.built) == 1
+    assert used[1] is factory.built[0]
+    assert factory.built[0].closed == 1
+
+
+async def test_turn_that_read_a_key_before_its_replacement_keeps_the_new_client(keystore: InboxKeyStore) -> None:
+    async def replace(store: InboxKeyStore) -> None:
+        await save(store, 3, SECOND)
+
+    factory, llms, used = await stale_turn_after(keystore, replace)
+    newer, stale = factory.built
+    assert newer.credentials == SECOND
+    assert stale.credentials == FIRST
+    assert used == [newer, stale]
+    assert llms._leases[3].client is newer
+    assert newer.closed == 0
+    assert stale.closed == 1
+    async with llms.lease(3) as source:
+        assert source.client is newer

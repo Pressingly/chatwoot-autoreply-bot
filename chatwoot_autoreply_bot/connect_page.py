@@ -11,6 +11,7 @@ from chatwoot_autoreply_bot.events import InboxRef
 from chatwoot_autoreply_bot.keystore import Connection
 
 TITLE = "Auto-reply LLM keys"
+HOST_NOT_ALLOWED = "host no longer allowed, reconnect"
 REFILLED_FIELDS = ("inbox_id", "base_url", "model")
 
 
@@ -43,7 +44,7 @@ def render_connect_page(view: PageView) -> str:
             f"<h1>{TITLE}</h1>",
             _error(view.error),
             "<h2>Inboxes</h2>",
-            _inbox_table(inbox_rows(view.inboxes, view.connections), view.csrf_token),
+            _inbox_table(inbox_rows(view.inboxes, view.connections), view.csrf_token, view.allowed_hosts),
             "<h2>Connect a key</h2>",
             _connect_form(view),
         ]
@@ -67,33 +68,45 @@ def _error(message: str | None) -> str:
     return f'<p role="alert"><strong>{escape(message)}</strong></p>' if message else ""
 
 
-def _inbox_table(rows: Sequence[InboxRow], csrf_token: str) -> str:
+def _inbox_table(rows: Sequence[InboxRow], csrf_token: str, allowed_hosts: Collection[str]) -> str:
     if not rows:
         return "<p>No inboxes seen yet. Connect a key by inbox id below.</p>"
     header = "".join(
         f"<th>{name}</th>"
         for name in ("Inbox", "Name", "Account", "Provider host", "Model", "Key", "Set by", "Set at", "")
     )
-    lines = "\n".join(_inbox_row(row, csrf_token) for row in rows)
+    lines = "\n".join(_inbox_row(row, csrf_token, allowed_hosts) for row in rows)
     return f"<table>\n<thead><tr>{header}</tr></thead>\n<tbody>\n{lines}\n</tbody>\n</table>"
 
 
-def _inbox_row(row: InboxRow, csrf_token: str) -> str:
+def _inbox_row(row: InboxRow, csrf_token: str, allowed_hosts: Collection[str]) -> str:
     inbox_cells = [
         str(row.inbox_id),
         row.inbox.name if row.inbox else "",
         str(row.inbox.account_id) if row.inbox and row.inbox.account_id else "",
     ]
-    cells = "".join(f"<td>{escape(value)}</td>" for value in inbox_cells + _connection_cells(row.connection))
+    cells = "".join(
+        f"<td>{escape(value)}</td>" for value in inbox_cells + _connection_cells(row.connection, allowed_hosts)
+    )
     action = _delete_form(row.inbox_id, csrf_token) if row.connection else ""
     return f"<tr>{cells}<td>{action}</td></tr>"
 
 
-def _connection_cells(connection: Connection | None) -> list[str]:
+def _connection_cells(connection: Connection | None, allowed_hosts: Collection[str]) -> list[str]:
     if connection is None:
         return ["", "", "not connected", "", ""]
     key = f"ending {connection.key_hint}" if connection.key_hint else "set"
-    return [connection.host, connection.model, key, connection.set_by, _timestamp(connection.set_at)]
+    return [
+        _host_cell(connection.host, allowed_hosts),
+        connection.model,
+        key,
+        connection.set_by,
+        _timestamp(connection.set_at),
+    ]
+
+
+def _host_cell(host: str, allowed_hosts: Collection[str]) -> str:
+    return host if host in allowed_hosts else f"{host} ({HOST_NOT_ALLOWED})"
 
 
 def _timestamp(epoch: float) -> str:

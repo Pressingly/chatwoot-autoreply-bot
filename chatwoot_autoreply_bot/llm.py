@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+import httpx
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -18,6 +19,7 @@ from openai import (
     AsyncOpenAI,
     AuthenticationError,
     BadRequestError,
+    DefaultAsyncHttpxClient,
     NotFoundError,
     PermissionDeniedError,
 )
@@ -82,6 +84,11 @@ def decide(completion: str) -> Decision:
     return Decision(handoff=not text, text=text)
 
 
+def no_redirect_http_client(timeout: float, transport: httpx.AsyncBaseTransport | None = None) -> httpx.AsyncClient:
+    """A redirect would re-send the transcript and the key to a host the base URL allowlist never checked."""
+    return DefaultAsyncHttpxClient(timeout=timeout, follow_redirects=False, transport=transport)
+
+
 class LlmClient:
     def __init__(self, client: AsyncOpenAI, model: str, max_tokens: int | None = None) -> None:
         self._client = client
@@ -98,8 +105,15 @@ class LlmClient:
         timeout: float,
         max_retries: int,
         max_tokens: int | None,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> LlmClient:
-        client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries)
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+            http_client=no_redirect_http_client(timeout, transport),
+        )
         return cls(client, model, max_tokens)
 
     @classmethod

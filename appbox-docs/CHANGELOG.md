@@ -22,6 +22,9 @@ tag and date and start a new **Unreleased** section. Put anything an operator ha
   `/connect` (mPass identity from `X-Auth-Request-Email`, CSRF token plus `Origin` check). The key is checked with
   one small completion, encrypted with `KEY_ENCRYPTION_KEY` and stored in `KEYSTORE_VALKEY_URL`. Replies use the
   inbox key, then the env key, else hand off with a private note; a rejected key hands off without retrying.
+  A stored key is used only while its host is still on `LLM_BASE_URL_ALLOWLIST`, and LLM calls never follow
+  redirects. With email capture on, an all-digit `X-Auth-Request-Preferred-Username` is matched as the admin's
+  mPass id, so bare-id allowlists work alongside real-email headers.
   ([FOSS-829](https://pm.moneta.askii.ai/moneta/browse/FOSS-829/))
 
 ### Behaviour changes

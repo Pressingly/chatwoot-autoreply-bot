@@ -2,13 +2,14 @@
 
 Clients are cached per inbox and key fingerprint. A client replaced by a new or
 deleted key is closed once the last turn leasing it finishes, so a reconnect never
-cuts a running call short.
+cuts a running call short. A stored key is used only while its host is still on
+``LLM_BASE_URL_ALLOWLIST``; the env fallback is operator-set and not checked.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Collection
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -58,21 +59,32 @@ class LlmRouter:
         keystore: InboxKeyStore | None = None,
         fallback: LlmClient | None = None,
         connect_url: str | None = None,
+        allowed_hosts: Collection[str] = frozenset(),
     ) -> None:
         self._client_factory = client_factory
         self._keystore = keystore
         self._fallback = fallback
         self._connect_url = connect_url
+        self._allowed_hosts = frozenset(allowed_hosts)
         self._leases: dict[int, _Lease] = {}
+        self._generations: dict[int, int] = {}
 
     @asynccontextmanager
     async def lease(self, inbox_id: int | None) -> AsyncIterator[LlmSource]:
-        credentials = await self._stored_credentials(inbox_id)
-        if credentials is None or inbox_id is None:
-            await self._retire(self._leases.pop(inbox_id, None) if inbox_id is not None else None)
+        if inbox_id is None:
             yield self._fallback_source()
             return
-        lease, replaced = self._acquire(inbox_id, credentials)
+        seen_generation = self._generation(inbox_id)
+        credentials = await self._stored_credentials(inbox_id)
+        if credentials is None:
+            await self._forget(inbox_id)
+            yield self._fallback_source()
+            return
+        if credentials.host not in self._allowed_hosts:
+            await self._forget(inbox_id)
+            log.warning("stored llm key host not allowed inbox=%s host=%s", inbox_id, credentials.host)
+            raise LlmUnavailable("host_not_allowed", self._host_not_allowed_note())
+        lease, replaced = self._acquire(inbox_id, credentials, seen_generation)
         try:
             await self._retire(replaced)
             yield LlmSource(lease.client, self._pasted_rejection_note())
@@ -100,13 +112,33 @@ class LlmRouter:
             log.error("keystore read failed inbox=%s error=%s", inbox_id, type(error).__name__)
             raise LlmUnavailable("keystore_error", KEYSTORE_ERROR_NOTE) from error
 
-    def _acquire(self, inbox_id: int, credentials: LlmCredentials) -> tuple[_Lease, _Lease | None]:
-        """Synchronous on purpose: no other turn can run between the lookup, the install and the hold."""
+    def _generation(self, inbox_id: int) -> int:
+        return self._generations.get(inbox_id, 0)
+
+    def _advance_generation(self, inbox_id: int) -> None:
+        self._generations[inbox_id] = self._generation(inbox_id) + 1
+
+    async def _forget(self, inbox_id: int) -> None:
+        self._advance_generation(inbox_id)
+        await self._retire(self._leases.pop(inbox_id, None))
+
+    def _acquire(
+        self, inbox_id: int, credentials: LlmCredentials, seen_generation: int
+    ) -> tuple[_Lease, _Lease | None]:
+        """Synchronous on purpose: no other turn can run between the lookup, the install and the hold.
+
+        A turn whose keystore read predates a newer observed change gets a one-shot client instead
+        of installing its possibly stale key over the newer one.
+        """
         current = self._leases.get(inbox_id)
         if current is not None and current.fingerprint == credentials.fingerprint:
             current.holders += 1
             return current, None
-        lease = _Lease(self._client_factory(credentials), credentials.fingerprint, holders=1)
+        client = self._client_factory(credentials)
+        if seen_generation < self._generation(inbox_id):
+            return _Lease(client, credentials.fingerprint, holders=1, retired=True), None
+        self._advance_generation(inbox_id)
+        lease = _Lease(client, credentials.fingerprint, holders=1)
         self._leases[inbox_id] = lease
         return lease, current
 
@@ -124,6 +156,11 @@ class LlmRouter:
 
     def _pasted_rejection_note(self) -> str:
         return self._with_connect_hint("LLM key rejected for this inbox.", verb="reconnect it")
+
+    def _host_not_allowed_note(self) -> str:
+        return self._with_connect_hint(
+            "The stored LLM key for this inbox uses a provider host that is no longer allowed.", verb="reconnect it"
+        )
 
     def _unreadable_note(self) -> str:
         return self._with_connect_hint("The stored LLM key for this inbox cannot be read.", verb="reconnect it")

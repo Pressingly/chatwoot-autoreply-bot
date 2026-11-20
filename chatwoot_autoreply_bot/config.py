@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from cryptography.fernet import Fernet
 
@@ -31,6 +31,8 @@ MIN_EDGE_SECRET_LENGTH = 32
 VALKEY_OPS_PER_TURN = 13
 VALKEY_OP_WORST_SECONDS = 4
 LOCK_MARGIN_SECONDS = 15
+HTTPS_PORT = 443
+PUBLIC_BASE_URL_ERROR = "PUBLIC_BASE_URL must be an https origin, e.g. https://chatwoot-autoreply.example.com"
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are the customer support assistant for this business, replying to its customers in a chat. "
@@ -204,9 +206,30 @@ def _public_base_url(env: Mapping[str, str]) -> str | None:
     if raw is None:
         return None
     parts = urlsplit(raw)
-    if parts.scheme != "https" or not parts.hostname or "@" in parts.netloc or parts.path.strip("/"):
-        raise ConfigError("PUBLIC_BASE_URL must be an https origin, e.g. https://chatwoot-autoreply.example.com")
-    return f"https://{parts.netloc.lower()}"
+    try:
+        port = parts.port
+    except ValueError as error:
+        raise ConfigError(PUBLIC_BASE_URL_ERROR) from error
+    if not _is_plain_https_origin(parts):
+        raise ConfigError(PUBLIC_BASE_URL_ERROR)
+    return _origin(str(parts.hostname), port)
+
+
+def _is_plain_https_origin(parts: SplitResult) -> bool:
+    return (
+        parts.scheme == "https"
+        and bool(parts.hostname)
+        and "@" not in parts.netloc
+        and not parts.path.strip("/")
+        and not parts.query
+        and not parts.fragment
+    )
+
+
+def _origin(hostname: str, port: int | None) -> str:
+    """What a browser sends as ``Origin``: the default https port is never spelled out."""
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    return f"https://{host}" if port in (None, HTTPS_PORT) else f"https://{host}:{port}"
 
 
 def _optional(env: Mapping[str, str], name: str, *, lower: bool = False) -> str | None:

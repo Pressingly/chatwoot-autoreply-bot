@@ -56,7 +56,16 @@ def test_bad_fernet_key_refuses_to_start() -> None:
 
 
 @pytest.mark.parametrize(
-    "url", ["http://bot.example.com", "https://", "https://bot.example.com/connect", "https://u@bot.example.com"]
+    "url",
+    [
+        "http://bot.example.com",
+        "https://",
+        "https://bot.example.com/connect",
+        "https://u@bot.example.com",
+        "https://bot.example.com?x=1",
+        "https://bot.example.com#top",
+        "https://bot.example.com:notaport",
+    ],
 )
 def test_public_base_url_must_be_an_https_origin(url: str) -> None:
     with pytest.raises(ConfigError, match="PUBLIC_BASE_URL"):
@@ -115,3 +124,16 @@ def test_connect_refuses_a_short_edge_secret() -> None:
 def test_edge_secret_is_not_in_the_repr() -> None:
     settings = Settings.from_env({**BASE_ENV, **CONNECT_ENV})
     assert "e" * 32 not in repr(settings)
+
+
+@pytest.mark.parametrize(
+    ("url", "origin"),
+    [
+        ("https://Bot.Example.com:443", "https://bot.example.com"),
+        ("https://bot.example.com:443/", "https://bot.example.com"),
+        ("https://Bot.Example.com:8443", "https://bot.example.com:8443"),
+        ("https://[::1]:8443", "https://[::1]:8443"),
+    ],
+)
+def test_public_base_url_is_normalised_to_the_browser_origin(url: str, origin: str) -> None:
+    assert Settings.from_env({**REQUIRED_ENV, **CONNECT_ENV, "PUBLIC_BASE_URL": url}).public_base_url == origin
