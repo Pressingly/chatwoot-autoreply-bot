@@ -27,6 +27,7 @@ tag and date and start a new **Unreleased** section. Put anything an operator ha
 ### Behaviour changes
 
 - `LLM_API_KEY` and `LLM_MODEL` are now optional and act as the fallback for inboxes without a pasted key. The
-  bot still refuses to start with neither an env LLM nor a keystore. Turning on `CONNECT_ADMIN_MPASS_IDS` needs
+  bot still refuses to start with neither an env LLM nor a keystore, or with `LLM_API_KEY` but no `LLM_MODEL`; a
+  lone `LLM_MODEL` is ignored. Turning on `CONNECT_ADMIN_MPASS_IDS` needs
   `KEY_ENCRYPTION_KEY`, `KEYSTORE_VALKEY_URL` (an `appendonly`, `noeviction` Valkey) and `PUBLIC_BASE_URL`, and
   Traefik must route `/connect` through mpass-auth. ([FOSS-829](https://pm.moneta.askii.ai/moneta/browse/FOSS-829/))

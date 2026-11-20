@@ -62,16 +62,25 @@ def test_public_base_url_must_be_an_https_origin(url: str) -> None:
         Settings.from_env({**REQUIRED_ENV, **CONNECT_ENV, "PUBLIC_BASE_URL": url})
 
 
-@pytest.mark.parametrize("present", ["LLM_API_KEY", "LLM_MODEL"])
-def test_half_an_env_llm_refuses_to_start(present: str) -> None:
-    with pytest.raises(ConfigError, match="together"):
-        Settings.from_env({**BASE_ENV, present: "x"})
+def test_env_key_without_a_model_refuses_to_start() -> None:
+    with pytest.raises(ConfigError, match="LLM_API_KEY needs LLM_MODEL"):
+        Settings.from_env({**BASE_ENV, **CONNECT_ENV, "LLM_API_KEY": "x"})
+
+
+def test_lone_env_model_is_not_a_fallback() -> None:
+    settings = Settings.from_env({**BASE_ENV, **CONNECT_ENV, "LLM_MODEL": "gpt-test"})
+    assert not settings.has_fallback_llm
 
 
 @pytest.mark.parametrize("present", ["KEY_ENCRYPTION_KEY", "KEYSTORE_VALKEY_URL"])
-def test_half_a_keystore_refuses_to_start(present: str) -> None:
-    with pytest.raises(ConfigError, match="together"):
-        Settings.from_env({**REQUIRED_ENV, present: CONNECT_ENV[present]})
+def test_half_a_keystore_without_the_page_is_ignored(present: str) -> None:
+    settings = Settings.from_env({**REQUIRED_ENV, present: CONNECT_ENV[present]})
+    assert not settings.keystore_enabled
+    assert settings.has_fallback_llm
+
+
+def test_lone_bad_encryption_key_is_ignored_while_the_keystore_is_off() -> None:
+    assert not Settings.from_env({**REQUIRED_ENV, "KEY_ENCRYPTION_KEY": "not-a-key"}).keystore_enabled
 
 
 def test_no_llm_source_at_all_refuses_to_start() -> None:

@@ -1,8 +1,10 @@
 """Per-inbox LLM keys, encrypted with Fernet, in a durable Valkey of their own.
 
 The shared ``VALKEY_URL`` runs ``allkeys-lru`` and may evict, so keys live in
-``KEYSTORE_VALKEY_URL`` (appendonly, noeviction). The sealed blob names its inbox,
-so a ciphertext copied onto another inbox's record does not decrypt there.
+``KEYSTORE_VALKEY_URL`` (appendonly, noeviction). The sealed blob carries its inbox,
+base URL and model as well as the key, so neither a ciphertext copied onto another
+inbox nor an edited plaintext base URL can send the key anywhere else. The plaintext
+fields only feed the Connect page listing.
 """
 
 from __future__ import annotations
@@ -48,18 +50,33 @@ class KeyCipher:
     def __init__(self, fernet_key: str) -> None:
         self._fernet = Fernet(fernet_key)
 
-    def seal(self, inbox_id: int, api_key: str) -> str:
-        plaintext = json.dumps({"inbox_id": inbox_id, "api_key": api_key}).encode()
-        return self._fernet.encrypt(plaintext).decode()
+    def seal(self, inbox_id: int, credentials: LlmCredentials) -> str:
+        plaintext = {
+            "inbox_id": inbox_id,
+            "base_url": credentials.base_url,
+            "model": credentials.model,
+            "api_key": credentials.api_key,
+        }
+        return self._fernet.encrypt(json.dumps(plaintext).encode()).decode()
 
-    def open(self, inbox_id: int, sealed: str) -> str:
+    def open(self, inbox_id: int, sealed: str) -> LlmCredentials:
         try:
             data = json.loads(self._fernet.decrypt(sealed.encode()))
         except (InvalidToken, ValueError) as error:
             raise KeyUnreadable(type(error).__name__) from error
-        if not isinstance(data, dict) or data.get("inbox_id") != inbox_id or not isinstance(data.get("api_key"), str):
-            raise KeyUnreadable("sealed key belongs to another inbox")
-        return data["api_key"]
+        if not _sealed_for(data, inbox_id):
+            raise KeyUnreadable("sealed key belongs to another inbox or is incomplete")
+        return LlmCredentials(base_url=data["base_url"], model=data["model"], api_key=data["api_key"])
+
+
+def _sealed_for(data: Any, inbox_id: int) -> bool:
+    return (
+        isinstance(data, dict)
+        and data.get("inbox_id") == inbox_id
+        and isinstance(data.get("base_url"), str | None)
+        and isinstance(data.get("model"), str)
+        and isinstance(data.get("api_key"), str)
+    )
 
 
 class InboxKeyStore:
@@ -71,7 +88,7 @@ class InboxKeyStore:
         record = {
             "base_url": credentials.base_url,
             "model": credentials.model,
-            "sealed_key": self._cipher.seal(inbox_id, credentials.api_key),
+            "sealed_key": self._cipher.seal(inbox_id, credentials),
             "key_hint": key_hint(credentials.api_key),
             "set_by": set_by,
             "set_at": set_at,
@@ -88,8 +105,7 @@ class InboxKeyStore:
         record = _record(raw)
         if record is None:
             raise KeyUnreadable("malformed record")
-        api_key = self._cipher.open(inbox_id, record["sealed_key"])
-        return LlmCredentials(base_url=_base_url(record), model=record["model"], api_key=api_key)
+        return self._cipher.open(inbox_id, record["sealed_key"])
 
     async def connection(self, inbox_id: int) -> Connection | None:
         raw = await self._client.hget(KEYS_HASH, str(inbox_id))

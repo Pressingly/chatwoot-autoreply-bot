@@ -30,26 +30,44 @@ def keystore(valkey: FakeAsyncRedis) -> InboxKeyStore:
 
 def test_cipher_round_trip() -> None:
     cipher = KeyCipher(FERNET_KEY)
-    assert cipher.open(3, cipher.seal(3, API_KEY)) == API_KEY
+    assert cipher.open(3, cipher.seal(3, CREDENTIALS)) == CREDENTIALS
 
 
 def test_sealed_key_does_not_open_for_another_inbox() -> None:
     cipher = KeyCipher(FERNET_KEY)
     with pytest.raises(KeyUnreadable):
-        cipher.open(4, cipher.seal(3, API_KEY))
+        cipher.open(4, cipher.seal(3, CREDENTIALS))
 
 
 def test_sealed_key_does_not_open_with_another_encryption_key() -> None:
-    sealed = KeyCipher(FERNET_KEY).seal(3, API_KEY)
+    sealed = KeyCipher(FERNET_KEY).seal(3, CREDENTIALS)
     with pytest.raises(KeyUnreadable):
         KeyCipher(Fernet.generate_key().decode()).open(3, sealed)
 
 
-def test_sealed_payload_without_a_key_is_unreadable() -> None:
-    fernet = Fernet(FERNET_KEY)
-    sealed = fernet.encrypt(json.dumps({"inbox_id": 3}).encode()).decode()
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"inbox_id": 3},
+        {"inbox_id": 3, "base_url": None, "model": "m"},
+        {"inbox_id": 3, "base_url": 5, "model": "m", "api_key": "k"},
+        ["not", "a", "dict"],
+    ],
+)
+def test_incomplete_sealed_payload_is_unreadable(payload: object) -> None:
+    sealed = Fernet(FERNET_KEY).encrypt(json.dumps(payload).encode()).decode()
     with pytest.raises(KeyUnreadable):
         KeyCipher(FERNET_KEY).open(3, sealed)
+
+
+async def test_editing_the_plaintext_base_url_cannot_redirect_the_key(
+    keystore: InboxKeyStore, valkey: FakeAsyncRedis
+) -> None:
+    await keystore.save(3, CREDENTIALS, set_by="1234", set_at=1)
+    record = json.loads(await valkey.hget(KEYS_HASH, "3"))
+    record["base_url"] = "https://attacker.example/v1"
+    await valkey.hset(KEYS_HASH, "3", json.dumps(record))
+    assert await keystore.credentials(3) == CREDENTIALS
 
 
 @pytest.mark.parametrize(("api_key", "hint"), [(API_KEY, "cdef"), ("short-key", "")])

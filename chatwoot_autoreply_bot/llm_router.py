@@ -69,12 +69,12 @@ class LlmRouter:
     async def lease(self, inbox_id: int | None) -> AsyncIterator[LlmSource]:
         credentials = await self._stored_credentials(inbox_id)
         if credentials is None or inbox_id is None:
-            await self._retire(inbox_id)
+            await self._retire(self._leases.pop(inbox_id, None) if inbox_id is not None else None)
             yield self._fallback_source()
             return
-        lease = await self._lease_for(inbox_id, credentials)
-        lease.holders += 1
+        lease, replaced = self._acquire(inbox_id, credentials)
         try:
+            await self._retire(replaced)
             yield LlmSource(lease.client, self._pasted_rejection_note())
         finally:
             lease.holders -= 1
@@ -100,17 +100,17 @@ class LlmRouter:
             log.error("keystore read failed inbox=%s error=%s", inbox_id, type(error).__name__)
             raise LlmUnavailable("keystore_error", KEYSTORE_ERROR_NOTE) from error
 
-    async def _lease_for(self, inbox_id: int, credentials: LlmCredentials) -> _Lease:
+    def _acquire(self, inbox_id: int, credentials: LlmCredentials) -> tuple[_Lease, _Lease | None]:
+        """Synchronous on purpose: no other turn can run between the lookup, the install and the hold."""
         current = self._leases.get(inbox_id)
         if current is not None and current.fingerprint == credentials.fingerprint:
-            return current
-        await self._retire(inbox_id)
-        lease = _Lease(self._client_factory(credentials), credentials.fingerprint)
+            current.holders += 1
+            return current, None
+        lease = _Lease(self._client_factory(credentials), credentials.fingerprint, holders=1)
         self._leases[inbox_id] = lease
-        return lease
+        return lease, current
 
-    async def _retire(self, inbox_id: int | None) -> None:
-        lease = self._leases.pop(inbox_id, None) if inbox_id is not None else None
+    async def _retire(self, lease: _Lease | None) -> None:
         if lease is None:
             return
         lease.retired = True

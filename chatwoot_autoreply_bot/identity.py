@@ -38,13 +38,16 @@ class AdminAllowlist:
         return cls(normalised, normalise(default_email_domain))
 
     def mpass_id(self, identity: str) -> str | None:
-        """The bare mPass id behind a normalised identity, or None for a real email address."""
-        if not is_email_shaped(identity):
-            return identity or None
+        """The bare mPass id behind a normalised identity, or None for a real email address.
+
+        The synthetic suffix is checked before the email shape, so a dotless domain such as ``local`` works too.
+        """
         suffix = f"@{self.default_email_domain}"
         if self.default_email_domain and identity.endswith(suffix):
             return identity.removesuffix(suffix) or None
-        return None
+        if is_email_shaped(identity):
+            return None
+        return identity or None
 
     def aliases(self, identity: str) -> frozenset[str]:
         mpass_id = self.mpass_id(identity)

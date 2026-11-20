@@ -60,7 +60,9 @@ list messages, which is why the bot keeps its own transcript from the webhooks i
 ## Configuration
 
 Settings come from the environment only. The service refuses to start if a required one is missing, and also
-when it has no LLM source at all (neither `LLM_API_KEY` + `LLM_MODEL` nor a keystore).
+when it has no LLM source at all (neither `LLM_API_KEY` + `LLM_MODEL` nor a keystore). A lone `LLM_MODEL` is not a
+fallback, and a keystore needs both `KEY_ENCRYPTION_KEY` and `KEYSTORE_VALKEY_URL`; with the allowlist empty, only
+one of them set leaves the keystore off, while both set keep serving already pasted keys.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
@@ -113,7 +115,8 @@ the `LLM_API_KEY` fallback, otherwise a handoff with a private note pointing at 
   12 characters or more), who set it and when. The key itself is never shown or logged.
 - **Saving.** The form takes an inbox id, an https base URL on `LLM_BASE_URL_ALLOWLIST`, a model and a key. The
   key is checked with one small completion (no retries, at most 15 s) before it is stored; an auth or model error
-  is shown without the provider's own text. Keys are encrypted with `KEY_ENCRYPTION_KEY` and bound to their inbox.
+  is shown without the provider's own text. The key is encrypted with `KEY_ENCRYPTION_KEY` together with its
+  inbox id, base URL and model, so a stored record cannot be moved to another inbox or pointed at another host.
 - **CSRF.** Every POST needs the `__Host-cwbot_csrf` cookie token in the form and an `Origin` (or `Referer`)
   equal to `PUBLIC_BASE_URL`. Pages are sent `no-store` with `frame-ancestors 'none'`.
 - **Audit.** Saves and deletes log the mPass id, inbox id, provider host and model. An admin listed by a real

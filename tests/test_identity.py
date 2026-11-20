@@ -60,6 +60,11 @@ def test_other_identities_are_refused(header: str) -> None:
     assert not allowlist("1234", f"9999@{DOMAIN}").permits(header)
 
 
+@pytest.mark.parametrize(("entry", "header"), [("1234", "1234@local"), ("1234@local", "1234"), ("1234", "1234")])
+def test_dotless_synthetic_domain_still_matches(entry: str, header: str) -> None:
+    assert allowlist(entry, domain="local").permits(header)
+
+
 def test_without_a_domain_only_exact_matches_count() -> None:
     entries = allowlist("1234", domain=None)
     assert entries.permits("1234")

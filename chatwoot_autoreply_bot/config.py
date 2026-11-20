@@ -164,14 +164,13 @@ class Settings:
 
 
 def _check_llm_sources(settings: Settings) -> None:
-    if bool(settings.llm_api_key) != bool(settings.llm_model):
-        raise ConfigError("LLM_API_KEY and LLM_MODEL must be set together")
-    if bool(settings.key_encryption_key) != bool(settings.keystore_valkey_url):
-        raise ConfigError("KEY_ENCRYPTION_KEY and KEYSTORE_VALKEY_URL must be set together")
-    if settings.key_encryption_key:
-        _check_fernet_key(settings.key_encryption_key)
+    """A lone LLM_MODEL or a lone keystore setting is ignored: compose files often pass them unconditionally."""
+    if settings.llm_api_key and not settings.llm_model:
+        raise ConfigError("LLM_API_KEY needs LLM_MODEL")
     if settings.connect_enabled:
         _check_connect_requirements(settings)
+    if settings.keystore_enabled:
+        _check_fernet_key(str(settings.key_encryption_key))
     if not settings.has_fallback_llm and not settings.keystore_enabled:
         raise ConfigError("set LLM_API_KEY and LLM_MODEL, or CONNECT_ADMIN_MPASS_IDS for per-inbox keys")
 

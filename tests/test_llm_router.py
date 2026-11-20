@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fakeredis import FakeAsyncRedis
 
@@ -185,3 +187,39 @@ async def test_aclose_closes_cached_and_fallback_clients_even_if_one_fails(keyst
 
 async def test_aclose_without_clients() -> None:
     await LlmRouter(client_factory=Factory()).aclose()
+
+
+async def test_turns_racing_a_slow_close_share_one_new_client(keystore: InboxKeyStore) -> None:
+    release = asyncio.Event()
+
+    class SlowClose(StubClient):
+        async def aclose(self) -> None:
+            await release.wait()
+            await super().aclose()
+
+    built: list[StubClient] = []
+
+    def factory(credentials: LlmCredentials) -> LlmClient:
+        client = SlowClose(credentials) if not built else StubClient(credentials)
+        built.append(client)
+        return client  # type: ignore[return-value]
+
+    llms = router(keystore, factory)  # type: ignore[arg-type]
+    await save(keystore, 3, FIRST)
+    async with llms.lease(3):
+        pass
+    await save(keystore, 3, SECOND)
+
+    async def turn() -> LlmClient:
+        async with llms.lease(3) as source:
+            await asyncio.sleep(0)
+            return source.client
+
+    first, second = asyncio.create_task(turn()), asyncio.create_task(turn())
+    await asyncio.sleep(0.01)
+    release.set()
+    assert await first is await second is built[1]
+    assert len(built) == 2
+    assert built[0].closed == 1
+    await llms.aclose()
+    assert built[1].closed == 1
