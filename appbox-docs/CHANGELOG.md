@@ -18,3 +18,15 @@ tag and date and start a new **Unreleased** section. Put anything an operator ha
   LLM's `[[HANDOFF]]` signal or on failure. Unauthenticated bodies are capped at `MAX_BODY_BYTES`, the LLM
   call and every Chatwoot call are time-boxed inside the lock lifetime, outstanding turns resume after a restart, and `/healthz` checks Valkey.
   ([FOSS-725](https://pm.moneta.askii.ai/moneta/browse/FOSS-725/))
+- Per-inbox LLM keys: admins on `CONNECT_ADMIN_MPASS_IDS` paste a base URL, model and key for an inbox at
+  `/connect` (mPass identity from `X-Auth-Request-Email`, CSRF token plus `Origin` check). The key is checked with
+  one small completion, encrypted with `KEY_ENCRYPTION_KEY` and stored in `KEYSTORE_VALKEY_URL`. Replies use the
+  inbox key, then the env key, else hand off with a private note; a rejected key hands off without retrying.
+  ([FOSS-829](https://pm.moneta.askii.ai/moneta/browse/FOSS-829/))
+
+### Behaviour changes
+
+- `LLM_API_KEY` and `LLM_MODEL` are now optional and act as the fallback for inboxes without a pasted key. The
+  bot still refuses to start with neither an env LLM nor a keystore. Turning on `CONNECT_ADMIN_MPASS_IDS` needs
+  `KEY_ENCRYPTION_KEY`, `KEYSTORE_VALKEY_URL` (an `appendonly`, `noeviction` Valkey) and `PUBLIC_BASE_URL`, and
+  Traefik must route `/connect` through mpass-auth. ([FOSS-829](https://pm.moneta.askii.ai/moneta/browse/FOSS-829/))

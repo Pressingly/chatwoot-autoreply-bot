@@ -16,7 +16,12 @@ pending conversations through an OpenAI-compatible LLM and hands off to humans b
   handoff. `responder.py`'s `hand_off` never raises, so a handoff is never repeated.
 - `digits.py`: strict ASCII digit parsing for every id and timestamp from a request.
 - `responder.py`: one reply turn; customer messages past the answered marker are unanswered.
-- `chatwoot.py`: the Chatwoot REST calls. `llm.py`: the LLM call and sentinel.
+- `chatwoot.py`: the Chatwoot REST calls. `llm.py`: the LLM call, sentinel and key probe.
+- `llm_router.py`: per-conversation LLM choice (inbox key, then env key) with a per-inbox client cache.
+- `connect.py`, `connect_form.py`, `connect_page.py`: the `/connect` key page (routes, form validation, HTML).
+  `identity.py`: mPass header normalisation and the admin allowlist. `keystore.py`: Fernet-encrypted per-inbox
+  keys in `KEYSTORE_VALKEY_URL`. `inbox_recorder.py`: inboxes seen in webhooks, for the page's list.
+- Never log or render an LLM key, an email address or a provider error body.
 
 ## Commands
 
