@@ -76,6 +76,7 @@ one of them set leaves the keystore off, while both set keep serving already pas
 | `KEY_ENCRYPTION_KEY` | with the allowlist | | Fernet key that encrypts pasted LLM keys |
 | `KEYSTORE_VALKEY_URL` | with the allowlist | | Durable Valkey (`appendonly yes`, `noeviction`) for pasted keys and the inbox list |
 | `PUBLIC_BASE_URL` | with the allowlist | | The bot's public https origin; used for the CSRF `Origin` check and in handoff notes |
+| `CONNECT_EDGE_SECRET` | with the allowlist | | At least 32 characters; Traefik's mPass router sends it as `X-Mpass-Edge-Secret`, so containers that reach the bot directly cannot forge identity headers |
 | `LLM_BASE_URL_ALLOWLIST` | no | `api.openai.com,api.askii.ai,api.sandbox.askii.ai,api.anthropic.com` | Hosts a pasted base URL may use (https only) |
 | `DEFAULT_EMAIL_DOMAIN` | no | | Synthetic email domain, so `<id>@<domain>` and a bare `<id>` match the same allowlist entry |
 | `CHATWOOT_INTERNAL_URL` | no | `http://chatwoot:3000` | Where the bot calls the Chatwoot API |
@@ -117,6 +118,8 @@ the `LLM_API_KEY` fallback, otherwise a handoff with a private note pointing at 
   key is checked with one small completion (no retries, at most 15 s) before it is stored; an auth or model error
   is shown without the provider's own text. The key is encrypted with `KEY_ENCRYPTION_KEY` together with its
   inbox id, base URL and model, so a stored record cannot be moved to another inbox or pointed at another host.
+- **Edge secret.** Every `/connect` request must carry `X-Mpass-Edge-Secret` equal to `CONNECT_EDGE_SECRET`
+  (constant-time compare); without it the identity header is ignored and the request gets a 401.
 - **CSRF.** Every POST needs the `__Host-cwbot_csrf` cookie token in the form and an `Origin` (or `Referer`)
   equal to `PUBLIC_BASE_URL`. Pages are sent `no-store` with `frame-ancestors 'none'`.
 - **Audit.** Saves and deletes log the mPass id, inbox id, provider host and model. An admin listed by a real

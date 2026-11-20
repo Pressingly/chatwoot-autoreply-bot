@@ -13,6 +13,7 @@ CONNECT_ENV = {
     "KEYSTORE_VALKEY_URL": "redis://keystore:6379/0",
     "PUBLIC_BASE_URL": "https://Chatwoot-Autoreply.example.com/",
     "DEFAULT_EMAIL_DOMAIN": " FOSS.Example ",
+    "CONNECT_EDGE_SECRET": "e" * 32,
 }
 
 
@@ -97,3 +98,20 @@ def test_keystore_without_the_page_still_serves_pasted_keys() -> None:
 def test_base_url_allowlist_override() -> None:
     settings = Settings.from_env({**REQUIRED_ENV, "LLM_BASE_URL_ALLOWLIST": " LLM.Example , gw.example "})
     assert settings.llm_base_url_allowlist == ("llm.example", "gw.example")
+
+
+def test_connect_requires_an_edge_secret() -> None:
+    env = {**BASE_ENV, **CONNECT_ENV}
+    del env["CONNECT_EDGE_SECRET"]
+    with pytest.raises(ConfigError, match="CONNECT_EDGE_SECRET"):
+        Settings.from_env(env)
+
+
+def test_connect_refuses_a_short_edge_secret() -> None:
+    with pytest.raises(ConfigError, match="at least 32"):
+        Settings.from_env({**BASE_ENV, **CONNECT_ENV, "CONNECT_EDGE_SECRET": "e" * 31})
+
+
+def test_edge_secret_is_not_in_the_repr() -> None:
+    settings = Settings.from_env({**BASE_ENV, **CONNECT_ENV})
+    assert "e" * 32 not in repr(settings)

@@ -15,7 +15,7 @@ import logging
 import secrets
 import string
 from collections.abc import Awaitable, Callable, Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import APIRouter, Request
@@ -31,6 +31,7 @@ from chatwoot_autoreply_bot.llm import LlmCredentials
 log = logging.getLogger(__name__)
 
 IDENTITY_HEADER = "X-Auth-Request-Email"
+EDGE_SECRET_HEADER = "X-Mpass-Edge-Secret"
 CSRF_COOKIE = "__Host-cwbot_csrf"
 CSRF_FIELD = "csrf_token"
 CSRF_TOKEN_ALPHABET = frozenset(string.ascii_letters + string.digits + "-_")
@@ -59,6 +60,7 @@ class Refused(Exception):
 @dataclass(frozen=True)
 class ConnectDeps:
     allowlist: AdminAllowlist
+    edge_secret: str = field(repr=False)
     public_origin: str
     allowed_hosts: Collection[str]
     check_credentials: CredentialCheck
@@ -94,12 +96,12 @@ async def _guarded(handler: Callable[[], Awaitable[Response]]) -> Response:
 
 
 async def _show(request: Request, deps: ConnectDeps) -> Response:
-    _require_admin(request, deps.allowlist)
+    _require_admin(request, deps.allowlist, deps.edge_secret)
     return await _page(request, deps, _csrf_token(request))
 
 
 async def _save(request: Request, deps: ConnectDeps) -> Response:
-    actor = deps.allowlist.actor_label(_require_admin(request, deps.allowlist))
+    actor = deps.allowlist.actor_label(_require_admin(request, deps.allowlist, deps.edge_secret))
     fields = await _verified_form(request, deps.public_origin)
     token = fields[CSRF_FIELD]
     try:
@@ -122,7 +124,7 @@ async def _save(request: Request, deps: ConnectDeps) -> Response:
 
 
 async def _delete(request: Request, deps: ConnectDeps, raw_inbox_id: str) -> Response:
-    actor = deps.allowlist.actor_label(_require_admin(request, deps.allowlist))
+    actor = deps.allowlist.actor_label(_require_admin(request, deps.allowlist, deps.edge_secret))
     fields = await _verified_form(request, deps.public_origin)
     try:
         inbox_id = parse_inbox_id(raw_inbox_id)
@@ -141,7 +143,10 @@ async def _delete(request: Request, deps: ConnectDeps, raw_inbox_id: str) -> Res
     return RedirectResponse("/connect", status_code=303)
 
 
-def _require_admin(request: Request, allowlist: AdminAllowlist) -> str:
+def _require_admin(request: Request, allowlist: AdminAllowlist, edge_secret: str) -> str:
+    if not _came_through_edge(request, edge_secret):
+        log.warning("connect denied reason=edge_secret")
+        raise Refused(401, "Sign in through mPass to manage auto-reply keys.")
     identity = normalise(request.headers.get(IDENTITY_HEADER))
     if not identity:
         raise Refused(401, "Sign in through mPass to manage auto-reply keys.")
@@ -149,6 +154,12 @@ def _require_admin(request: Request, allowlist: AdminAllowlist) -> str:
         log.warning("connect denied mpass_id=%s", allowlist.actor_label(identity))
         raise Refused(403, "Your account is not allowed to manage auto-reply LLM keys.")
     return identity
+
+
+def _came_through_edge(request: Request, edge_secret: str) -> bool:
+    """Only Traefik's mPass router sets this header; it keeps backend neighbours from forging identity headers."""
+    presented = request.headers.get(EDGE_SECRET_HEADER, "")
+    return hmac.compare_digest(presented.encode(), edge_secret.encode())
 
 
 async def _verified_form(request: Request, public_origin: str) -> dict[str, str]:

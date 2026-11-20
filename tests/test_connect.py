@@ -24,6 +24,7 @@ ORIGIN = "https://chatwoot-autoreply.example.com"
 ADMIN = "1234"
 DOMAIN = "foss.example"
 API_KEY = "sk-live-abcdefghijklmnop"
+EDGE_SECRET = "edge-secret-0123456789abcdefghijklmnop"
 CONNECT_SETTINGS = replace(
     SETTINGS,
     connect_admin_ids=(ADMIN,),
@@ -31,6 +32,7 @@ CONNECT_SETTINGS = replace(
     keystore_valkey_url="redis://unused-keystore",
     public_base_url=ORIGIN,
     default_email_domain=DOMAIN,
+    connect_edge_secret=EDGE_SECRET,
 )
 VALID_FORM = {
     "inbox_id": "3",
@@ -81,8 +83,9 @@ class Page:
         return await self.client.post(path, data=form, headers=headers)
 
 
-def _identity(identity: str | None) -> dict[str, str]:
-    return {} if identity is None else {"X-Auth-Request-Email": identity}
+def _identity(identity: str | None, edge_secret: str | None = EDGE_SECRET) -> dict[str, str]:
+    edge = {} if edge_secret is None else {"X-Mpass-Edge-Secret": edge_secret}
+    return edge if identity is None else {**edge, "X-Auth-Request-Email": identity}
 
 
 @pytest.fixture
@@ -128,6 +131,17 @@ async def test_missing_identity_is_401(page: Page) -> None:
 
 async def test_blank_identity_is_401(page: Page) -> None:
     assert (await page.get(identity="   ")).status_code == 401
+
+
+@pytest.mark.parametrize("edge_secret", [None, "", "wrong-secret", EDGE_SECRET[:-1]])
+@pytest.mark.parametrize(("method", "path"), [("GET", "/connect"), ("POST", "/connect"), ("POST", "/connect/3/delete")])
+async def test_forged_identity_without_the_edge_secret_is_401(
+    page: Page, edge_secret: str | None, method: str, path: str
+) -> None:
+    headers = {**_identity(ADMIN, edge_secret), "Origin": ORIGIN}
+    response = await page.client.request(method, path, headers=headers, data=VALID_FORM if method == "POST" else None)
+    assert response.status_code == 401
+    assert await page.keystore.connections() == []
 
 
 async def test_post_without_identity_is_401(page: Page) -> None:

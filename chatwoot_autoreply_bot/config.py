@@ -27,6 +27,7 @@ OPEN_ATTEMPTS = 3
 OPEN_RETRY_SECONDS = 1.0
 OPEN_BACKOFF_SECONDS = OPEN_RETRY_SECONDS * sum(range(1, OPEN_ATTEMPTS))
 LLM_RETRY_SLACK_SECONDS = 10
+MIN_EDGE_SECRET_LENGTH = 32
 VALKEY_OPS_PER_TURN = 13
 VALKEY_OP_WORST_SECONDS = 4
 LOCK_MARGIN_SECONDS = 15
@@ -88,6 +89,7 @@ class Settings:
     llm_base_url_allowlist: tuple[str, ...] = DEFAULT_LLM_BASE_URL_ALLOWLIST
     default_email_domain: str | None = None
     public_base_url: str | None = None
+    connect_edge_secret: str | None = field(default=None, repr=False)
 
     def prompt_for(self, account_id: int) -> str:
         return self.account_prompts.get(account_id, self.system_prompt)
@@ -158,6 +160,7 @@ class Settings:
             llm_base_url_allowlist=_list(env, "LLM_BASE_URL_ALLOWLIST", DEFAULT_LLM_BASE_URL_ALLOWLIST),
             default_email_domain=_optional(env, "DEFAULT_EMAIL_DOMAIN", lower=True),
             public_base_url=_public_base_url(env),
+            connect_edge_secret=_optional(env, "CONNECT_EDGE_SECRET"),
         )
         _check_llm_sources(settings)
         return settings
@@ -180,10 +183,13 @@ def _check_connect_requirements(settings: Settings) -> None:
         "KEY_ENCRYPTION_KEY": settings.key_encryption_key,
         "KEYSTORE_VALKEY_URL": settings.keystore_valkey_url,
         "PUBLIC_BASE_URL": settings.public_base_url,
+        "CONNECT_EDGE_SECRET": settings.connect_edge_secret,
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
         raise ConfigError(f"CONNECT_ADMIN_MPASS_IDS needs: {', '.join(missing)}")
+    if len(str(settings.connect_edge_secret)) < MIN_EDGE_SECRET_LENGTH:
+        raise ConfigError(f"CONNECT_EDGE_SECRET must be at least {MIN_EDGE_SECRET_LENGTH} characters")
 
 
 def _check_fernet_key(key: str) -> None:

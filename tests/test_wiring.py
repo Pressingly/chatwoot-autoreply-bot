@@ -32,6 +32,7 @@ async def test_build_services_wires_the_keystore_and_connect_page() -> None:
         "KEY_ENCRYPTION_KEY": FERNET_KEY,
         "KEYSTORE_VALKEY_URL": "redis://keystore:6379/0",
         "PUBLIC_BASE_URL": "https://bot.example.com",
+        "CONNECT_EDGE_SECRET": "e" * 32,
     }
     settings = Settings.from_env(env)
     services = build_services(settings)
