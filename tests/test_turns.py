@@ -9,14 +9,14 @@ from chatwoot_autoreply_bot.llm import HANDOFF_SENTINEL
 from chatwoot_autoreply_bot.responder import Responder
 from chatwoot_autoreply_bot.scheduler import ReplyScheduler
 from chatwoot_autoreply_bot.store import ValkeyStore
-from tests.helpers import KEY, FakeChatwoot
+from tests.helpers import KEY, FakeChatwoot, static_llms
 from tests.test_responder import FakeLlm, no_sleep
 
 
 def wire(store: ValkeyStore, chatwoot: FakeChatwoot, llm: FakeLlm) -> tuple[Responder, ReplyScheduler]:
     responder = Responder(
         chatwoot=chatwoot.client(),
-        llm=llm.client(),
+        llms=static_llms(llm.client()),
         store=store,
         prompt_for=lambda _: "p",
         handoff_message="H",
@@ -38,7 +38,7 @@ async def test_message_arriving_during_the_llm_call_gets_its_own_reply(
 ) -> None:
     llm = FakeLlm()
     responder, scheduler = wire(store, chatwoot, llm)
-    complete = responder._llm.complete
+    complete = responder._llms._fallback.complete
     calls = 0
 
     async def customer_writes_mid_call(messages):
@@ -48,7 +48,7 @@ async def test_message_arriving_during_the_llm_call_gets_its_own_reply(
             await store.append(KEY, TranscriptEntry(2, "user", "B arrives mid-LLM"))
         return await complete(messages)
 
-    responder._llm.complete = customer_writes_mid_call
+    responder._llms._fallback.complete = customer_writes_mid_call
     await store.append(KEY, TranscriptEntry(1, "user", "A"))
     await scheduler.schedule(KEY)
     await asyncio.sleep(0.05)
@@ -111,7 +111,7 @@ async def test_llm_over_budget_is_one_handoff(store: ValkeyStore, chatwoot: Fake
         await asyncio.sleep(60)
         return "Too late"
 
-    responder._llm.complete = hang
+    responder._llms._fallback.complete = hang
     await store.append(KEY, TranscriptEntry(1, "user", "A"))
     await scheduler.schedule(KEY)
     await asyncio.wait_for(scheduler.drain(), 1)

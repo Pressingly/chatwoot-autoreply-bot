@@ -11,7 +11,8 @@ from enum import StrEnum
 from chatwoot_autoreply_bot.chatwoot import ChatwootClient, ChatwootError
 from chatwoot_autoreply_bot.config import OPEN_ATTEMPTS, OPEN_RETRY_SECONDS
 from chatwoot_autoreply_bot.events import ConversationKey, TranscriptEntry
-from chatwoot_autoreply_bot.llm import LlmClient, LlmError, build_messages, decide
+from chatwoot_autoreply_bot.llm import LlmClient, LlmError, LlmRejected, build_messages, decide
+from chatwoot_autoreply_bot.llm_router import LlmRouter, LlmUnavailable
 from chatwoot_autoreply_bot.store import ValkeyStore
 
 log = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ class Responder:
         self,
         *,
         chatwoot: ChatwootClient,
-        llm: LlmClient,
+        llms: LlmRouter,
         store: ValkeyStore,
         prompt_for: Callable[[int], str],
         handoff_message: str,
@@ -56,7 +57,7 @@ class Responder:
         sleep: Sleep = asyncio.sleep,
     ) -> None:
         self._chatwoot = chatwoot
-        self._llm = llm
+        self._llms = llms
         self._store = store
         self._prompt_for = prompt_for
         self._handoff_message = handoff_message
@@ -65,7 +66,8 @@ class Responder:
         self._sleep = sleep
 
     async def respond(self, key: ConversationKey) -> Outcome:
-        if not await self._bot_owns(key):
+        conversation = await self._chatwoot.conversation(key)
+        if conversation.status != BOT_STATUS:
             return Outcome.SKIPPED
         transcript = await self._store.transcript(key)
         unanswered = unanswered_customer_messages(transcript, await self._store.answered_through(key))
@@ -76,7 +78,15 @@ class Responder:
             return await self.hand_off(key, reason="customer_request", answered_through=through)
         messages = build_messages(self._prompt_for(key.account_id), llm_context(transcript, unanswered))
         try:
-            completion = await self._complete(key, messages)
+            completion = await self._ask_llm(key, conversation.inbox_id, messages)
+        except LlmUnavailable as problem:
+            log.warning(
+                "no usable llm account=%s conversation=%s inbox=%s reason=%s",
+                *_ids(key),
+                conversation.inbox_id,
+                problem.reason,
+            )
+            return await self.hand_off(key, reason=problem.reason, answered_through=through, note=problem.note)
         except LlmError as error:
             log.warning("llm failed account=%s conversation=%s error=%s", *_ids(key), error)
             return await self.hand_off(key, reason="llm_error", answered_through=through)
@@ -91,23 +101,39 @@ class Responder:
         await self._record_reply(key, message_id, decision.text)
         return Outcome.REPLIED
 
-    async def _complete(self, key: ConversationKey, messages: list[dict[str, str]]) -> str:
+    async def _ask_llm(self, key: ConversationKey, inbox_id: int | None, messages: list[dict[str, str]]) -> str:
+        async with self._llms.lease(inbox_id) as source:
+            try:
+                return await self._complete(key, source.client, messages)
+            except LlmRejected as error:
+                raise LlmUnavailable("llm_rejected", f"{source.rejection_note} Provider error: {error}.") from error
+
+    async def _complete(self, key: ConversationKey, llm: LlmClient, messages: list[dict[str, str]]) -> str:
         """Only the LLM call is time-boxed, so running out of time is an LLM failure and never cuts a post short."""
         async with self._typing(key):
             try:
                 async with asyncio.timeout(self._llm_budget_seconds):
-                    return await self._llm.complete(messages)
+                    return await llm.complete(messages)
             except TimeoutError as error:
                 raise LlmError("TimeoutError") from error
 
-    async def hand_off(self, key: ConversationKey, *, reason: str, answered_through: int | None = None) -> Outcome:
-        """Post the note once and open the conversation. Never raises, so a caller never posts the note twice."""
+    async def hand_off(
+        self,
+        key: ConversationKey,
+        *,
+        reason: str,
+        answered_through: int | None = None,
+        note: str | None = None,
+    ) -> Outcome:
+        """Post the messages once and open the conversation. Never raises, so a caller never posts them twice."""
         try:
             if await self._bot_released(key):
                 return Outcome.SKIPPED
             if answered_through is not None:
                 await self._advance_quietly(key, answered_through)
             await self._post_handoff_note(key)
+            if note is not None:
+                await self._post_private_note(key, note)
             opened = await self._open(key)
         except Exception as error:
             log.error("handoff failed account=%s conversation=%s error=%s", *_ids(key), type(error).__name__)
@@ -122,6 +148,12 @@ class Responder:
             await self._chatwoot.post_message(key, self._handoff_message)
         except ChatwootError as error:
             log.warning("handoff note failed account=%s conversation=%s error=%s", *_ids(key), error)
+
+    async def _post_private_note(self, key: ConversationKey, note: str) -> None:
+        try:
+            await self._chatwoot.post_message(key, note, private=True)
+        except ChatwootError as error:
+            log.warning("private note failed account=%s conversation=%s error=%s", *_ids(key), error)
 
     async def _open(self, key: ConversationKey) -> bool:
         for attempt in range(1, OPEN_ATTEMPTS + 1):

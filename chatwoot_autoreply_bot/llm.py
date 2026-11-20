@@ -6,10 +6,21 @@ on every OpenAI-compatible endpoint, including ones without function calling.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
-from openai import AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    BadRequestError,
+    NotFoundError,
+    PermissionDeniedError,
+)
 
 from chatwoot_autoreply_bot.events import TranscriptEntry
 
@@ -18,16 +29,45 @@ HANDOFF_INSTRUCTION = (
     f"If the customer asks for a human, is upset, or needs something you cannot answer from what you know, "
     f"reply with exactly {HANDOFF_SENTINEL} and nothing else; a team member will take over."
 )
+REJECTIONS = (AuthenticationError, PermissionDeniedError, NotFoundError)
+PROBE_MESSAGES = [{"role": "user", "content": "Reply with OK."}]
 
 
 class LlmError(RuntimeError):
     """The LLM call failed or returned no usable text."""
 
 
+class LlmRejected(LlmError):
+    """The endpoint refused the key or the model; retrying cannot help."""
+
+
 @dataclass(frozen=True)
 class Decision:
     handoff: bool
     text: str = ""
+
+
+@dataclass(frozen=True)
+class LlmCredentials:
+    base_url: str | None
+    model: str
+    api_key: str = field(repr=False)
+
+    @property
+    def fingerprint(self) -> str:
+        material = "\n".join((self.base_url or "", self.model, self.api_key))
+        return hashlib.sha256(material.encode()).hexdigest()
+
+    @property
+    def host(self) -> str:
+        return (urlsplit(self.base_url).hostname or "") if self.base_url else "api.openai.com"
+
+
+@dataclass(frozen=True)
+class LlmLimits:
+    timeout: float
+    max_retries: int
+    max_tokens: int | None = None
 
 
 def build_messages(system_prompt: str, transcript: Sequence[TranscriptEntry]) -> list[dict[str, str]]:
@@ -62,6 +102,17 @@ class LlmClient:
         client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries)
         return cls(client, model, max_tokens)
 
+    @classmethod
+    def for_credentials(cls, credentials: LlmCredentials, limits: LlmLimits) -> LlmClient:
+        return cls.build(
+            api_key=credentials.api_key,
+            base_url=credentials.base_url,
+            model=credentials.model,
+            timeout=limits.timeout,
+            max_retries=limits.max_retries,
+            max_tokens=limits.max_tokens,
+        )
+
     async def aclose(self) -> None:
         await self._client.close()
 
@@ -73,9 +124,44 @@ class LlmClient:
             response = await self._client.chat.completions.create(
                 model=self._model, messages=messages, **self._limits()
             )
+        except REJECTIONS as error:
+            raise LlmRejected(type(error).__name__) from error
         except Exception as error:
             raise LlmError(type(error).__name__) from error
         content = response.choices[0].message.content if response.choices else None
         if not content:
             raise LlmError("empty completion")
         return content
+
+    async def probe(self) -> None:
+        """One tiny completion, as the reply path would send it; raises the provider's exception unchanged."""
+        await self._client.chat.completions.create(model=self._model, messages=PROBE_MESSAGES, **self._limits())
+
+
+def probe_failure_message(error: Exception) -> str:
+    """A fixed message per failure class; the provider's own text can echo the key, so it is never shown."""
+    if isinstance(error, AuthenticationError | PermissionDeniedError):
+        return "The provider rejected this API key."
+    if isinstance(error, NotFoundError):
+        return "The provider does not know this model, or the base URL path is wrong."
+    if isinstance(error, BadRequestError):
+        return "The provider refused the test request. Check the model name."
+    if isinstance(error, APITimeoutError):
+        return "The provider did not answer in time. Try again."
+    if isinstance(error, APIConnectionError):
+        return "Could not reach the provider at this base URL."
+    if isinstance(error, APIStatusError):
+        return f"The provider answered the test request with HTTP {error.status_code}."
+    return "The key could not be checked. Try again."
+
+
+async def check_credentials(credentials: LlmCredentials, limits: LlmLimits) -> str | None:
+    """None when the key and model answer a test completion, else a message safe to show the admin."""
+    client = LlmClient.for_credentials(credentials, limits)
+    try:
+        await client.probe()
+    except Exception as error:
+        return probe_failure_message(error)
+    finally:
+        await client.aclose()
+    return None

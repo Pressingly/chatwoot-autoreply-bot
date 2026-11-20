@@ -9,21 +9,25 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
+
+from cryptography.fernet import Fernet
 
 from chatwoot_autoreply_bot.digits import parse_digits
 
-REQUIRED = ("CHATWOOT_BOT_TOKEN", "CHATWOOT_BOT_SECRET", "VALKEY_URL", "LLM_API_KEY", "LLM_MODEL")
+REQUIRED = ("CHATWOOT_BOT_TOKEN", "CHATWOOT_BOT_SECRET", "VALKEY_URL")
 ACCOUNT_PROMPT_PREFIX = "SYSTEM_PROMPT_ACCOUNT_"
+DEFAULT_LLM_BASE_URL_ALLOWLIST = ("api.openai.com", "api.askii.ai", "api.sandbox.askii.ai", "api.anthropic.com")
 
 # Worst-case reply turn, which the per-conversation lock must outlive:
 # reply path: status, typing on, typing off, status, post (fails) = 5 calls,
-# then the scheduler's handoff: status, note, open x OPEN_ATTEMPTS = 5 calls.
-CHATWOOT_CALLS_PER_TURN = 10
+# then the scheduler's handoff: status, message, private note, open x OPEN_ATTEMPTS = 6 calls.
+CHATWOOT_CALLS_PER_TURN = 11
 OPEN_ATTEMPTS = 3
 OPEN_RETRY_SECONDS = 1.0
 OPEN_BACKOFF_SECONDS = OPEN_RETRY_SECONDS * sum(range(1, OPEN_ATTEMPTS))
 LLM_RETRY_SLACK_SECONDS = 10
-VALKEY_OPS_PER_TURN = 12
+VALKEY_OPS_PER_TURN = 13
 VALKEY_OP_WORST_SECONDS = 4
 LOCK_MARGIN_SECONDS = 15
 
@@ -59,8 +63,8 @@ class Settings:
     chatwoot_bot_token: str
     chatwoot_bot_secret: str
     valkey_url: str
-    llm_api_key: str
-    llm_model: str
+    llm_api_key: str | None = field(default=None, repr=False)
+    llm_model: str | None = None
     chatwoot_internal_url: str = "http://chatwoot:3000"
     llm_base_url: str | None = None
     llm_timeout_seconds: float = 30.0
@@ -78,9 +82,33 @@ class Settings:
     chatwoot_timeout_seconds: float = 10.0
     http_port: int = 8000
     max_body_bytes: int = 1024 * 1024
+    connect_admin_ids: tuple[str, ...] = ()
+    key_encryption_key: str | None = field(default=None, repr=False)
+    keystore_valkey_url: str | None = None
+    llm_base_url_allowlist: tuple[str, ...] = DEFAULT_LLM_BASE_URL_ALLOWLIST
+    default_email_domain: str | None = None
+    public_base_url: str | None = None
 
     def prompt_for(self, account_id: int) -> str:
         return self.account_prompts.get(account_id, self.system_prompt)
+
+    @property
+    def connect_enabled(self) -> bool:
+        return bool(self.connect_admin_ids)
+
+    @property
+    def keystore_enabled(self) -> bool:
+        return bool(self.keystore_valkey_url and self.key_encryption_key)
+
+    @property
+    def has_fallback_llm(self) -> bool:
+        return bool(self.llm_api_key and self.llm_model)
+
+    @property
+    def connect_url(self) -> str | None:
+        if not (self.connect_enabled and self.public_base_url):
+            return None
+        return f"{self.public_base_url}/connect"
 
     @property
     def llm_budget_seconds(self) -> float:
@@ -99,14 +127,14 @@ class Settings:
         missing = [name for name in REQUIRED if not env.get(name, "").strip()]
         if missing:
             raise ConfigError(f"missing required settings: {', '.join(missing)}")
-        return cls(
+        settings = cls(
             chatwoot_bot_token=env["CHATWOOT_BOT_TOKEN"].strip(),
             chatwoot_bot_secret=env["CHATWOOT_BOT_SECRET"].strip(),
             valkey_url=env["VALKEY_URL"].strip(),
-            llm_api_key=env["LLM_API_KEY"].strip(),
-            llm_model=env["LLM_MODEL"].strip(),
+            llm_api_key=_optional(env, "LLM_API_KEY"),
+            llm_model=_optional(env, "LLM_MODEL"),
             chatwoot_internal_url=_text(env, "CHATWOOT_INTERNAL_URL", cls.chatwoot_internal_url).rstrip("/"),
-            llm_base_url=env.get("LLM_BASE_URL", "").strip() or None,
+            llm_base_url=_optional(env, "LLM_BASE_URL"),
             llm_timeout_seconds=_positive(env, "LLM_TIMEOUT_SECONDS", cls.llm_timeout_seconds),
             llm_max_retries=int(_non_negative(env, "LLM_MAX_RETRIES", cls.llm_max_retries)),
             llm_max_tokens=_optional_positive_int(env, "LLM_MAX_TOKENS"),
@@ -124,7 +152,66 @@ class Settings:
             chatwoot_timeout_seconds=_positive(env, "CHATWOOT_TIMEOUT_SECONDS", cls.chatwoot_timeout_seconds),
             http_port=int(_positive(env, "PORT", cls.http_port)),
             max_body_bytes=int(_positive(env, "MAX_BODY_BYTES", cls.max_body_bytes)),
+            connect_admin_ids=_list(env, "CONNECT_ADMIN_MPASS_IDS", ()),
+            key_encryption_key=_optional(env, "KEY_ENCRYPTION_KEY"),
+            keystore_valkey_url=_optional(env, "KEYSTORE_VALKEY_URL"),
+            llm_base_url_allowlist=_list(env, "LLM_BASE_URL_ALLOWLIST", DEFAULT_LLM_BASE_URL_ALLOWLIST),
+            default_email_domain=_optional(env, "DEFAULT_EMAIL_DOMAIN", lower=True),
+            public_base_url=_public_base_url(env),
         )
+        _check_llm_sources(settings)
+        return settings
+
+
+def _check_llm_sources(settings: Settings) -> None:
+    if bool(settings.llm_api_key) != bool(settings.llm_model):
+        raise ConfigError("LLM_API_KEY and LLM_MODEL must be set together")
+    if bool(settings.key_encryption_key) != bool(settings.keystore_valkey_url):
+        raise ConfigError("KEY_ENCRYPTION_KEY and KEYSTORE_VALKEY_URL must be set together")
+    if settings.key_encryption_key:
+        _check_fernet_key(settings.key_encryption_key)
+    if settings.connect_enabled:
+        _check_connect_requirements(settings)
+    if not settings.has_fallback_llm and not settings.keystore_enabled:
+        raise ConfigError("set LLM_API_KEY and LLM_MODEL, or CONNECT_ADMIN_MPASS_IDS for per-inbox keys")
+
+
+def _check_connect_requirements(settings: Settings) -> None:
+    required = {
+        "KEY_ENCRYPTION_KEY": settings.key_encryption_key,
+        "KEYSTORE_VALKEY_URL": settings.keystore_valkey_url,
+        "PUBLIC_BASE_URL": settings.public_base_url,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise ConfigError(f"CONNECT_ADMIN_MPASS_IDS needs: {', '.join(missing)}")
+
+
+def _check_fernet_key(key: str) -> None:
+    try:
+        Fernet(key)
+    except ValueError as error:
+        raise ConfigError("KEY_ENCRYPTION_KEY must be a Fernet key (32 url-safe base64-encoded bytes)") from error
+
+
+def _public_base_url(env: Mapping[str, str]) -> str | None:
+    raw = _optional(env, "PUBLIC_BASE_URL")
+    if raw is None:
+        return None
+    parts = urlsplit(raw)
+    if parts.scheme != "https" or not parts.hostname or "@" in parts.netloc or parts.path.strip("/"):
+        raise ConfigError("PUBLIC_BASE_URL must be an https origin, e.g. https://chatwoot-autoreply.example.com")
+    return f"https://{parts.netloc.lower()}"
+
+
+def _optional(env: Mapping[str, str], name: str, *, lower: bool = False) -> str | None:
+    value = env.get(name, "").strip()
+    return (value.lower() if lower else value) or None
+
+
+def _list(env: Mapping[str, str], name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    values = tuple(item.strip().lower() for item in env.get(name, "").split(",") if item.strip())
+    return values or default
 
 
 def _text(env: Mapping[str, str], name: str, default: str) -> str:
