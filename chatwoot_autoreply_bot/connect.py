@@ -63,6 +63,7 @@ class Refused(Exception):
 class ConnectDeps:
     allowlist: AdminAllowlist
     edge_secret: str = field(repr=False)
+    trust_preferred_username: bool
     public_origin: str
     allowed_hosts: Collection[str]
     check_credentials: CredentialCheck
@@ -98,12 +99,12 @@ async def _guarded(handler: Callable[[], Awaitable[Response]]) -> Response:
 
 
 async def _show(request: Request, deps: ConnectDeps) -> Response:
-    _require_admin(request, deps.allowlist, deps.edge_secret)
+    _require_admin(request, deps.allowlist, deps.edge_secret, deps.trust_preferred_username)
     return await _page(request, deps, _csrf_token(request))
 
 
 async def _save(request: Request, deps: ConnectDeps) -> Response:
-    actor = _require_admin(request, deps.allowlist, deps.edge_secret)
+    actor = _require_admin(request, deps.allowlist, deps.edge_secret, deps.trust_preferred_username)
     fields = await _verified_form(request, deps.public_origin)
     token = fields[CSRF_FIELD]
     try:
@@ -129,7 +130,7 @@ async def _save(request: Request, deps: ConnectDeps) -> Response:
 
 
 async def _delete(request: Request, deps: ConnectDeps, raw_inbox_id: str) -> Response:
-    actor = _require_admin(request, deps.allowlist, deps.edge_secret)
+    actor = _require_admin(request, deps.allowlist, deps.edge_secret, deps.trust_preferred_username)
     fields = await _verified_form(request, deps.public_origin)
     try:
         inbox_id = parse_inbox_id(raw_inbox_id)
@@ -148,12 +149,15 @@ async def _delete(request: Request, deps: ConnectDeps, raw_inbox_id: str) -> Res
     return RedirectResponse("/connect", status_code=303)
 
 
-def _require_admin(request: Request, allowlist: AdminAllowlist, edge_secret: str) -> str:
+def _require_admin(
+    request: Request, allowlist: AdminAllowlist, edge_secret: str, trust_preferred_username: bool
+) -> str:
     """The admin's actor label (mPass id, never an email) once the edge, identity and allowlist checks pass."""
     if not _came_through_edge(request, edge_secret):
         log.warning("connect denied reason=edge_secret")
         raise Refused(401, "Sign in through mPass to manage auto-reply keys.")
-    identity = Identity.from_headers(request.headers.get(IDENTITY_HEADER), request.headers.get(MPASS_ID_HEADER))
+    preferred_username = request.headers.get(MPASS_ID_HEADER) if trust_preferred_username else None
+    identity = Identity.from_headers(request.headers.get(IDENTITY_HEADER), preferred_username)
     if not identity.email:
         raise Refused(401, "Sign in through mPass to manage auto-reply keys.")
     actor = allowlist.actor_label(identity)

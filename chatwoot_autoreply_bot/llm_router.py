@@ -77,11 +77,11 @@ class LlmRouter:
         seen_generation = self._generation(inbox_id)
         credentials = await self._stored_credentials(inbox_id)
         if credentials is None:
-            await self._forget(inbox_id)
+            await self._forget(inbox_id, seen_generation)
             yield self._fallback_source()
             return
         if credentials.host not in self._allowed_hosts:
-            await self._forget(inbox_id)
+            await self._forget(inbox_id, seen_generation)
             log.warning("stored llm key host not allowed inbox=%s host=%s", inbox_id, credentials.host)
             raise LlmUnavailable("host_not_allowed", self._host_not_allowed_note())
         lease, replaced = self._acquire(inbox_id, credentials, seen_generation)
@@ -118,7 +118,10 @@ class LlmRouter:
     def _advance_generation(self, inbox_id: int) -> None:
         self._generations[inbox_id] = self._generation(inbox_id) + 1
 
-    async def _forget(self, inbox_id: int) -> None:
+    async def _forget(self, inbox_id: int, seen_generation: int) -> None:
+        """A read older than the current generation must not evict what a newer read installed."""
+        if seen_generation < self._generation(inbox_id):
+            return
         self._advance_generation(inbox_id)
         await self._retire(self._leases.pop(inbox_id, None))
 

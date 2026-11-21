@@ -316,3 +316,24 @@ async def test_turn_that_read_a_key_before_its_replacement_keeps_the_new_client(
     assert stale.closed == 1
     async with llms.lease(3) as source:
         assert source.client is newer
+
+
+async def test_stale_empty_read_does_not_evict_a_newer_key(keystore: InboxKeyStore) -> None:
+    gated = GatedKeystore(keystore)
+    factory = Factory()
+    llms = router(gated, factory, StubClient())
+    gated.gate_next = True
+
+    async def stale_turn() -> None:
+        async with llms.lease(3):
+            pass
+
+    stale = asyncio.create_task(stale_turn())
+    await gated.reading.wait()
+    await save(keystore, 3, FIRST)
+    async with llms.lease(3) as source:
+        fresh = source.client
+    gated.release.set()
+    await stale
+    assert llms._leases[3].client is fresh
+    assert factory.built[0].closed == 0

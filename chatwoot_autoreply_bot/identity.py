@@ -80,8 +80,19 @@ class AdminAllowlist:
         synthetic = {f"{mpass_id}@{self.default_email_domain}"} if self.default_email_domain else set()
         return frozenset({identity, mpass_id, *synthetic})
 
+    def separate_mpass_id(self, identity: Identity) -> str | None:
+        """The Preferred-Username id, used only in the capture-on shape: a real email beside it.
+
+        A bare or synthetic email header is already the mPass id; a second id beside it would be the raw
+        Cognito claim, which a user may be able to edit.
+        """
+        if identity.mpass_id and self.mpass_id(identity.email) is None:
+            return identity.mpass_id
+        return None
+
     def identity_aliases(self, identity: Identity) -> frozenset[str]:
-        extra = self.aliases(identity.mpass_id) if identity.mpass_id else frozenset()
+        separate = self.separate_mpass_id(identity)
+        extra = self.aliases(separate) if separate else frozenset()
         return self.aliases(identity.email) | extra
 
     def permits(self, identity: Identity) -> bool:
@@ -89,4 +100,4 @@ class AdminAllowlist:
 
     def actor_label(self, identity: Identity) -> str:
         """What logs and the key record show for this person: the mPass id, never an email."""
-        return identity.mpass_id or self.mpass_id(identity.email) or EMAIL_IDENTITY_LABEL
+        return self.separate_mpass_id(identity) or self.mpass_id(identity.email) or EMAIL_IDENTITY_LABEL

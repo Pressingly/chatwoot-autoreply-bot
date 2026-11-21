@@ -137,3 +137,30 @@ def test_edge_secret_is_not_in_the_repr() -> None:
 )
 def test_public_base_url_is_normalised_to_the_browser_origin(url: str, origin: str) -> None:
     assert Settings.from_env({**REQUIRED_ENV, **CONNECT_ENV, "PUBLIC_BASE_URL": url}).public_base_url == origin
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("", False),
+        ("false", False),
+        ("0", False),
+        ("No", False),
+        ("true", True),
+        (" TRUE ", True),
+        ("1", True),
+        ("yes", True),
+    ],
+)
+def test_trust_preferred_username_flag(raw: str, expected: bool) -> None:
+    settings = Settings.from_env({**BASE_ENV, **CONNECT_ENV, "CONNECT_TRUST_PREFERRED_USERNAME": raw})
+    assert settings.connect_trust_preferred_username is expected
+
+
+def test_trust_preferred_username_defaults_off() -> None:
+    assert not Settings.from_env({**BASE_ENV, **CONNECT_ENV}).connect_trust_preferred_username
+
+
+def test_trust_preferred_username_rejects_other_words() -> None:
+    with pytest.raises(ConfigError, match="CONNECT_TRUST_PREFERRED_USERNAME"):
+        Settings.from_env({**BASE_ENV, **CONNECT_ENV, "CONNECT_TRUST_PREFERRED_USERNAME": "maybe"})

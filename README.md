@@ -76,6 +76,7 @@ one of them set leaves the keystore off, while both set keep serving already pas
 | `KEY_ENCRYPTION_KEY` | with the allowlist | | Fernet key that encrypts pasted LLM keys |
 | `KEYSTORE_VALKEY_URL` | with the allowlist | | Durable Valkey (`appendonly yes`, `noeviction`) for pasted keys and the inbox list |
 | `PUBLIC_BASE_URL` | with the allowlist | | The bot's public https origin; used for the CSRF `Origin` check and in handoff notes |
+| `CONNECT_TRUST_PREFERRED_USERNAME` | no | `false` | `true` only on hosts with email capture on, where mpass-auth-proxy stamps `preferred_username` with the mPass id |
 | `CONNECT_EDGE_SECRET` | with the allowlist | | At least 32 characters; Traefik's mPass router sends it as `X-Mpass-Edge-Secret`, so containers that reach the bot directly cannot forge identity headers |
 | `LLM_BASE_URL_ALLOWLIST` | no | `api.openai.com,api.askii.ai,api.sandbox.askii.ai,api.anthropic.com` | Hosts a pasted base URL may use (https only) |
 | `DEFAULT_EMAIL_DOMAIN` | no | | Synthetic email domain, so `<id>@<domain>` and a bare `<id>` match the same allowlist entry |
@@ -112,9 +113,10 @@ the `LLM_API_KEY` fallback, otherwise a handoff with a private note pointing at 
   value is normalised like Chatwoot's mPass patch (trimmed, lowercased, email shape checked without a regex), and
   `1234`, `1234@<DEFAULT_EMAIL_DOMAIN>` match each other on either side. With email capture on, the email header
   carries the user's real address and the mPass id arrives in `X-Auth-Request-Preferred-Username` (same edge,
-  same strip); when that value is all ASCII digits it is matched as a bare mPass id too, so a list of bare ids
-  works on both kinds of host. Any other value there (a display name, a Cognito sub) is ignored, and the email
-  header is still required.
+  same strip). With `CONNECT_TRUST_PREFERRED_USERNAME=true`, set only where mpass-auth-proxy stamps that claim
+  (email capture on), an all-ASCII-digit value there is matched as a bare mPass id too, and only beside a real
+  email header. Off (the default), or beside a bare or synthetic email header, it is ignored: on capture-off hosts
+  it is the raw Cognito attribute, which a user may be able to edit. The email header is always required.
 - **Listing.** Inboxes are learned from webhook payloads (`inbox.id`, `inbox.name`); any other inbox id can be
   typed in. Each connected inbox shows the provider host, model, the key's last four characters (only for keys of
   12 characters or more), who set it and when. The key itself is never shown or logged.

@@ -212,6 +212,7 @@ def _connect_deps(settings: Settings, clock: Clock, credential_check: Credential
     return ConnectDeps(
         allowlist=AdminAllowlist.build(settings.connect_admin_ids, settings.default_email_domain),
         edge_secret=str(settings.connect_edge_secret),
+        trust_preferred_username=settings.connect_trust_preferred_username,
         public_origin=str(settings.public_base_url),
         allowed_hosts=frozenset(settings.llm_base_url_allowlist),
         check_credentials=credential_check or check,

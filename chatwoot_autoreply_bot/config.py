@@ -28,6 +28,8 @@ OPEN_RETRY_SECONDS = 1.0
 OPEN_BACKOFF_SECONDS = OPEN_RETRY_SECONDS * sum(range(1, OPEN_ATTEMPTS))
 LLM_RETRY_SLACK_SECONDS = 10
 MIN_EDGE_SECRET_LENGTH = 32
+TRUE_WORDS = frozenset({"true", "1", "yes"})
+FALSE_WORDS = frozenset({"", "false", "0", "no"})
 VALKEY_OPS_PER_TURN = 13
 VALKEY_OP_WORST_SECONDS = 4
 LOCK_MARGIN_SECONDS = 15
@@ -92,6 +94,7 @@ class Settings:
     default_email_domain: str | None = None
     public_base_url: str | None = None
     connect_edge_secret: str | None = field(default=None, repr=False)
+    connect_trust_preferred_username: bool = False
 
     def prompt_for(self, account_id: int) -> str:
         return self.account_prompts.get(account_id, self.system_prompt)
@@ -163,6 +166,7 @@ class Settings:
             default_email_domain=_optional(env, "DEFAULT_EMAIL_DOMAIN", lower=True),
             public_base_url=_public_base_url(env),
             connect_edge_secret=_optional(env, "CONNECT_EDGE_SECRET"),
+            connect_trust_preferred_username=_flag(env, "CONNECT_TRUST_PREFERRED_USERNAME"),
         )
         _check_llm_sources(settings)
         return settings
@@ -235,6 +239,15 @@ def _origin(hostname: str, port: int | None) -> str:
 def _optional(env: Mapping[str, str], name: str, *, lower: bool = False) -> str | None:
     value = env.get(name, "").strip()
     return (value.lower() if lower else value) or None
+
+
+def _flag(env: Mapping[str, str], name: str) -> bool:
+    value = env.get(name, "").strip().lower()
+    if value in TRUE_WORDS:
+        return True
+    if value in FALSE_WORDS:
+        return False
+    raise ConfigError(f"{name} must be true or false")
 
 
 def _list(env: Mapping[str, str], name: str, default: tuple[str, ...]) -> tuple[str, ...]:

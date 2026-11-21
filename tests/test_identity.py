@@ -129,3 +129,11 @@ def test_actor_label_prefers_the_mpass_id_over_the_email() -> None:
 def test_bare_mpass_id_is_ascii_digits_only() -> None:
     assert bare_mpass_id(" 0042 ") == "0042"
     assert bare_mpass_id("4²") is None
+
+
+@pytest.mark.parametrize("own_identity", ["5555", f"5555@{DOMAIN}"])
+def test_second_id_beside_a_bare_or_synthetic_identity_is_ignored(own_identity: str) -> None:
+    identity = who(own_identity, "1234")
+    entries = allowlist("1234")
+    assert not entries.permits(identity)
+    assert entries.actor_label(identity) == "5555"

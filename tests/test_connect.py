@@ -33,6 +33,7 @@ CONNECT_SETTINGS = replace(
     public_base_url=ORIGIN,
     default_email_domain=DOMAIN,
     connect_edge_secret=EDGE_SECRET,
+    connect_trust_preferred_username=True,
 )
 VALID_FORM = {
     "inbox_id": "3",
@@ -437,3 +438,20 @@ async def test_preferred_username_that_is_not_a_bare_id_does_not_grant_access(
 async def test_preferred_username_without_the_email_header_is_401(page: Page) -> None:
     headers = {**_identity(None), **_capture_on(ADMIN)}
     assert (await page.client.get("/connect", headers=headers)).status_code == 401
+
+
+async def test_preferred_username_is_ignored_unless_the_deployment_trusts_it(
+    store: ValkeyStore, keystore: InboxKeyStore, check: KeyCheck
+) -> None:
+    untrusting = replace(CONNECT_SETTINGS, connect_trust_preferred_username=False)
+    async for page in page_for(untrusting, store, keystore, check):
+        headers = {**_identity(REAL_EMAIL), **_capture_on(ADMIN)}
+        assert (await page.client.get("/connect", headers=headers)).status_code == 403
+
+
+@pytest.mark.parametrize("own_identity", ["5555", f"5555@{DOMAIN}"])
+async def test_capture_off_user_cannot_borrow_an_admin_id_through_preferred_username(
+    page: Page, own_identity: str
+) -> None:
+    headers = {**_identity(own_identity), **_capture_on(ADMIN)}
+    assert (await page.client.get("/connect", headers=headers)).status_code == 403
