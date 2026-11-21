@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
-from chatwoot_autoreply_bot.events import ConversationKey
+from chatwoot_autoreply_bot.events import ConversationKey, positive_int
 
 
 class ChatwootError(RuntimeError):
     """A Chatwoot call failed or returned something unusable."""
+
+
+@dataclass(frozen=True)
+class ConversationState:
+    status: str
+    inbox_id: int | None
 
 
 class ChatwootClient:
@@ -32,23 +39,27 @@ class ChatwootClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def conversation_status(self, key: ConversationKey) -> str:
+    async def conversation(self, key: ConversationKey) -> ConversationState:
         data = await self._request("GET", _conversation_path(key))
-        status = data.get("status") if isinstance(data, dict) else None
+        data = data if isinstance(data, dict) else {}
+        status = data.get("status")
         if not isinstance(status, str):
             raise ChatwootError("conversation response has no status")
-        return status
+        return ConversationState(status, positive_int(data.get("inbox_id")))
+
+    async def conversation_status(self, key: ConversationKey) -> str:
+        return (await self.conversation(key)).status
 
     async def set_typing(self, key: ConversationKey, on: bool) -> None:
         await self._request(
             "POST", f"{_conversation_path(key)}/toggle_typing_status", {"typing_status": "on" if on else "off"}
         )
 
-    async def post_message(self, key: ConversationKey, content: str) -> int | None:
+    async def post_message(self, key: ConversationKey, content: str, *, private: bool = False) -> int | None:
         data = await self._request(
             "POST",
             f"{_conversation_path(key)}/messages",
-            {"content": content, "message_type": "outgoing", "private": False},
+            {"content": content, "message_type": "outgoing", "private": private},
         )
         message_id = data.get("id") if isinstance(data, dict) else None
         return message_id if isinstance(message_id, int) else None

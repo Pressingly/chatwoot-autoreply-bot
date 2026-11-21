@@ -10,7 +10,7 @@ from chatwoot_autoreply_bot.responder import Responder
 from chatwoot_autoreply_bot.scheduler import ReplyScheduler
 from chatwoot_autoreply_bot.signature import sign
 from chatwoot_autoreply_bot.store import ValkeyStore
-from tests.helpers import FakeChatwoot, message_payload
+from tests.helpers import FakeChatwoot, message_payload, static_llms
 from tests.test_app import NOW, SECRET, SETTINGS
 from tests.test_responder import FakeLlm
 
@@ -21,7 +21,7 @@ async def test_burst_of_customer_messages_gets_one_reply_with_full_context(
     llm = FakeLlm("We open at 9.")
     responder = Responder(
         chatwoot=chatwoot.client(),
-        llm=llm.client(),
+        llms=static_llms(llm.client()),
         store=store,
         prompt_for=lambda _: "Acme support.",
         handoff_message="handoff",
