@@ -29,7 +29,6 @@ OPEN_BACKOFF_SECONDS = OPEN_RETRY_SECONDS * sum(range(1, OPEN_ATTEMPTS))
 LLM_RETRY_SLACK_SECONDS = 10
 MIN_EDGE_SECRET_LENGTH = 32
 TRUE_WORDS = frozenset({"true", "1", "yes"})
-FALSE_WORDS = frozenset({"", "false", "0", "no"})
 VALKEY_OPS_PER_TURN = 13
 VALKEY_OP_WORST_SECONDS = 4
 LOCK_MARGIN_SECONDS = 15
@@ -173,14 +172,15 @@ class Settings:
 
 
 def _check_llm_sources(settings: Settings) -> None:
-    """A lone LLM_MODEL or a lone keystore setting is ignored: compose files often pass them unconditionally."""
+    """A lone LLM_MODEL or keystore is not a source: compose files pass them unconditionally, and without the
+    page nobody can paste a key, so every conversation would hand off silently."""
     if settings.llm_api_key and not settings.llm_model:
         raise ConfigError("LLM_API_KEY needs LLM_MODEL")
     if settings.connect_enabled:
         _check_connect_requirements(settings)
     if settings.keystore_enabled:
         _check_fernet_key(str(settings.key_encryption_key))
-    if not settings.has_fallback_llm and not settings.keystore_enabled:
+    if not settings.has_fallback_llm and not settings.connect_enabled:
         raise ConfigError("set LLM_API_KEY and LLM_MODEL, or CONNECT_ADMIN_MPASS_IDS for per-inbox keys")
 
 
@@ -242,12 +242,8 @@ def _optional(env: Mapping[str, str], name: str, *, lower: bool = False) -> str 
 
 
 def _flag(env: Mapping[str, str], name: str) -> bool:
-    value = env.get(name, "").strip().lower()
-    if value in TRUE_WORDS:
-        return True
-    if value in FALSE_WORDS:
-        return False
-    raise ConfigError(f"{name} must be true or false")
+    """Anything but an explicit true word is off, as mpass-auth-proxy reads the email-capture flag."""
+    return env.get(name, "").strip().lower() in TRUE_WORDS
 
 
 def _list(env: Mapping[str, str], name: str, default: tuple[str, ...]) -> tuple[str, ...]:

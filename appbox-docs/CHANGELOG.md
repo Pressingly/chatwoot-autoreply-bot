@@ -10,6 +10,14 @@ tag and date and start a new **Unreleased** section. Put anything an operator ha
 
 ## Unreleased
 
+### Fixed
+
+- Startup again refuses a bot with no LLM source: a keystore counts only while `CONNECT_ADMIN_MPASS_IDS` turns
+  the page on, so a host that only generated `KEY_ENCRYPTION_KEY` no longer starts and hands off every
+  conversation. `CONNECT_TRUST_PREFERRED_USERNAME` reads any value but `true`, `1` or `yes` as off instead of
+  refusing to start, matching how mpass-auth-proxy reads `LAUNCHPAD_EMAIL_CAPTURE`.
+  ([FOSS-829](https://pm.moneta.askii.ai/moneta/browse/FOSS-829/))
+
 ### Added
 
 - First release: a Chatwoot Agent Bot service that verifies signed webhooks on `POST /webhook`, keeps a
