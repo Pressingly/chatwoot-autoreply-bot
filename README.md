@@ -60,9 +60,9 @@ list messages, which is why the bot keeps its own transcript from the webhooks i
 ## Configuration
 
 Settings come from the environment only. The service refuses to start if a required one is missing, and also
-when it has no LLM source at all (neither `LLM_API_KEY` + `LLM_MODEL` nor a keystore). A lone `LLM_MODEL` is not a
-fallback, and a keystore needs both `KEY_ENCRYPTION_KEY` and `KEYSTORE_VALKEY_URL`; with the allowlist empty, only
-one of them set leaves the keystore off, while both set keep serving already pasted keys.
+when it has no LLM source at all (neither `LLM_API_KEY` + `LLM_MODEL` nor `CONNECT_ADMIN_MPASS_IDS`). A lone
+`LLM_MODEL` is not a fallback, and a keystore is not a source on its own: it needs both `KEY_ENCRYPTION_KEY` and
+`KEYSTORE_VALKEY_URL`, and with the allowlist empty it serves already pasted keys only beside an env fallback.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
@@ -76,7 +76,7 @@ one of them set leaves the keystore off, while both set keep serving already pas
 | `KEY_ENCRYPTION_KEY` | with the allowlist | | Fernet key that encrypts pasted LLM keys |
 | `KEYSTORE_VALKEY_URL` | with the allowlist | | Durable Valkey (`appendonly yes`, `noeviction`) for pasted keys and the inbox list |
 | `PUBLIC_BASE_URL` | with the allowlist | | The bot's public https origin; used for the CSRF `Origin` check and in handoff notes |
-| `CONNECT_TRUST_PREFERRED_USERNAME` | no | `false` | `true` only on hosts with email capture on, where mpass-auth-proxy stamps `preferred_username` with the mPass id |
+| `CONNECT_TRUST_PREFERRED_USERNAME` | no | `false` | `true` only on hosts with email capture on, where mpass-auth-proxy stamps `preferred_username` with the mPass id; any value but `true`, `1` or `yes` is off |
 | `CONNECT_EDGE_SECRET` | with the allowlist | | At least 32 characters; Traefik's mPass router sends it as `X-Mpass-Edge-Secret`, so containers that reach the bot directly cannot forge identity headers |
 | `LLM_BASE_URL_ALLOWLIST` | no | `api.openai.com,api.askii.ai,api.sandbox.askii.ai,api.anthropic.com` | Hosts a pasted base URL may use (https only) |
 | `DEFAULT_EMAIL_DOMAIN` | no | | Synthetic email domain, so `<id>@<domain>` and a bare `<id>` match the same allowlist entry |
