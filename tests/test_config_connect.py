@@ -99,9 +99,15 @@ def test_no_llm_source_at_all_refuses_to_start() -> None:
 
 
 def test_keystore_without_the_page_still_serves_pasted_keys() -> None:
-    env = {**BASE_ENV, "KEY_ENCRYPTION_KEY": FERNET_KEY, "KEYSTORE_VALKEY_URL": "redis://keystore"}
+    env = {**REQUIRED_ENV, "KEY_ENCRYPTION_KEY": FERNET_KEY, "KEYSTORE_VALKEY_URL": "redis://keystore"}
     settings = Settings.from_env(env)
     assert settings.keystore_enabled and not settings.connect_enabled
+
+
+def test_keystore_alone_is_not_an_llm_source() -> None:
+    env = {**BASE_ENV, "KEY_ENCRYPTION_KEY": FERNET_KEY, "KEYSTORE_VALKEY_URL": "redis://keystore"}
+    with pytest.raises(ConfigError, match="CONNECT_ADMIN_MPASS_IDS"):
+        Settings.from_env(env)
 
 
 def test_base_url_allowlist_override() -> None:
@@ -161,6 +167,12 @@ def test_trust_preferred_username_defaults_off() -> None:
     assert not Settings.from_env({**BASE_ENV, **CONNECT_ENV}).connect_trust_preferred_username
 
 
-def test_trust_preferred_username_rejects_other_words() -> None:
-    with pytest.raises(ConfigError, match="CONNECT_TRUST_PREFERRED_USERNAME"):
-        Settings.from_env({**BASE_ENV, **CONNECT_ENV, "CONNECT_TRUST_PREFERRED_USERNAME": "maybe"})
+@pytest.mark.parametrize("raw", ["maybe", "off", "on", "enabled"])
+def test_trust_preferred_username_treats_other_words_as_off(raw: str) -> None:
+    settings = Settings.from_env({**BASE_ENV, **CONNECT_ENV, "CONNECT_TRUST_PREFERRED_USERNAME": raw})
+    assert not settings.connect_trust_preferred_username
+
+
+def test_odd_trust_flag_does_not_stop_a_bot_without_the_page() -> None:
+    settings = Settings.from_env({**REQUIRED_ENV, "CONNECT_TRUST_PREFERRED_USERNAME": "off"})
+    assert not settings.connect_trust_preferred_username

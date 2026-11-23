@@ -52,6 +52,9 @@ async def test_build_services_without_an_env_llm() -> None:
     env = {name: value for name, value in REQUIRED_ENV.items() if name not in ("LLM_API_KEY", "LLM_MODEL")} | {
         "KEY_ENCRYPTION_KEY": FERNET_KEY,
         "KEYSTORE_VALKEY_URL": "redis://keystore:6379/0",
+        "CONNECT_ADMIN_MPASS_IDS": "1234",
+        "PUBLIC_BASE_URL": "https://bot.example.com",
+        "CONNECT_EDGE_SECRET": "e" * 32,
     }
     services = build_services(Settings.from_env(env))
     assert services.scheduler._respond.__self__._llms._fallback is None
