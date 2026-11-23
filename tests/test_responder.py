@@ -16,7 +16,7 @@ from chatwoot_autoreply_bot.responder import (
     unanswered_customer_messages,
 )
 from chatwoot_autoreply_bot.store import ValkeyStore
-from tests.helpers import KEY, FakeChatwoot, completion_response
+from tests.helpers import KEY, FakeChatwoot, completion_response, static_llms
 
 HANDOFF_NOTE = "A teammate will reply shortly."
 PHRASES = ("talk to a human",)
@@ -47,7 +47,7 @@ def responder(chatwoot: FakeChatwoot, store: ValkeyStore, llm: FakeLlm) -> Respo
     return Responder(
         sleep=no_sleep,
         chatwoot=chatwoot.client(),
-        llm=llm.client(),
+        llms=static_llms(llm.client()),
         store=store,
         prompt_for=lambda account_id: f"prompt for {account_id}",
         handoff_message=HANDOFF_NOTE,

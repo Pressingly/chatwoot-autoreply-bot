@@ -5,14 +5,27 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from cryptography.fernet import Fernet
 
 from chatwoot_autoreply_bot.chatwoot import ChatwootClient
 from chatwoot_autoreply_bot.events import ConversationKey
+from chatwoot_autoreply_bot.llm import LlmClient, LlmCredentials
+from chatwoot_autoreply_bot.llm_router import LlmRouter
 from chatwoot_autoreply_bot.store import StoreLimits
 
 KEY = ConversationKey(account_id=1, conversation_id=42)
 BASE = "/api/v1/accounts/1/conversations/42"
 LIMITS = StoreLimits(dedupe_ttl_seconds=60, transcript_max_messages=5, transcript_ttl_seconds=600, lock_ttl_seconds=30)
+INBOX_ID = 3
+FERNET_KEY = Fernet.generate_key().decode()
+
+
+def unused_factory(credentials: LlmCredentials) -> LlmClient:
+    raise AssertionError("no per-inbox client expected")
+
+
+def static_llms(client: LlmClient) -> LlmRouter:
+    return LlmRouter(client_factory=unused_factory, fallback=client)
 
 
 @dataclass
@@ -24,6 +37,7 @@ class FakeChatwoot:
     fail_paths: set[str] = field(default_factory=set)
     requests: list[httpx.Request] = field(default_factory=list)
     next_message_id: int = 1000
+    inbox_id: int | None = INBOX_ID
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -32,7 +46,7 @@ class FakeChatwoot:
             return httpx.Response(500)
         if request.method == "GET" and suffix == "":
             status = self.statuses.pop(0) if self.statuses else self.status
-            return httpx.Response(200, json={"id": KEY.conversation_id, "status": status})
+            return httpx.Response(200, json={"id": KEY.conversation_id, "status": status, "inbox_id": self.inbox_id})
         if suffix == "/messages":
             self.next_message_id += 1
             return httpx.Response(200, json={"id": self.next_message_id})
@@ -53,7 +67,13 @@ class FakeChatwoot:
         ]
 
     def posted_messages(self) -> list[str]:
-        return [body["content"] for method, path, body in self.calls() if method == "POST" and path == "/messages"]
+        return [body["content"] for body in self._message_bodies() if not body["private"]]
+
+    def private_notes(self) -> list[str]:
+        return [body["content"] for body in self._message_bodies() if body["private"]]
+
+    def _message_bodies(self) -> list[dict[str, Any]]:
+        return [body for method, path, body in self.calls() if method == "POST" and path == "/messages"]
 
     def writes(self) -> list[str]:
         return [path for method, path, _ in self.calls() if method == "POST"]

@@ -54,6 +54,33 @@ def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def positive_int(value: Any) -> int | None:
+    number = _int(value)
+    return number if number is not None and number > 0 else None
+
+
+@dataclass(frozen=True)
+class InboxRef:
+    inbox_id: int
+    account_id: int | None
+    name: str
+
+
+def parse_inbox(payload: Any) -> InboxRef | None:
+    """The ``inbox: {id, name}`` Chatwoot puts on message webhooks (``Message#webhook_data``)."""
+    payload = _dict(payload)
+    inbox = _dict(payload.get("inbox"))
+    inbox_id = positive_int(inbox.get("id"))
+    if inbox_id is None:
+        return None
+    name = inbox.get("name")
+    return InboxRef(
+        inbox_id=inbox_id,
+        account_id=positive_int(_dict(payload.get("account")).get("id")),
+        name=name.strip() if isinstance(name, str) else "",
+    )
+
+
 def parse_message_event(payload: Any) -> MessageEvent | None:
     """Return the message event, or None for other events and payloads missing an id."""
     payload = _dict(payload)

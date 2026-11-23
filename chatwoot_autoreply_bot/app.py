@@ -1,4 +1,5 @@
-"""HTTP surface: ``POST /webhook`` for Chatwoot and ``GET /healthz`` for the container probe.
+"""HTTP surface: ``POST /webhook`` for Chatwoot, ``GET /healthz`` for the container probe, and,
+when ``CONNECT_ADMIN_MPASS_IDS`` is set, the ``/connect`` key page.
 
 The webhook only verifies, dedupes, records and schedules, then answers: Chatwoot
 gives a bot webhook five seconds, so the LLM never runs in the request path.
@@ -18,16 +19,22 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 
+from chatwoot_autoreply_bot.bodies import BodyTooLarge, read_limited_body
 from chatwoot_autoreply_bot.chatwoot import ChatwootClient
 from chatwoot_autoreply_bot.config import Settings
-from chatwoot_autoreply_bot.digits import parse_digits
+from chatwoot_autoreply_bot.connect import ConnectDeps, CredentialCheck, connect_router
 from chatwoot_autoreply_bot.events import (
     is_human_agent_reply,
+    parse_inbox,
     parse_message_event,
     should_reply,
     transcript_entry,
 )
-from chatwoot_autoreply_bot.llm import LlmClient
+from chatwoot_autoreply_bot.identity import AdminAllowlist
+from chatwoot_autoreply_bot.inbox_recorder import InboxRecorder
+from chatwoot_autoreply_bot.keystore import InboxKeyStore, KeyCipher
+from chatwoot_autoreply_bot.llm import LlmClient, LlmCredentials, LlmLimits, check_credentials
+from chatwoot_autoreply_bot.llm_router import LlmRouter
 from chatwoot_autoreply_bot.responder import Responder
 from chatwoot_autoreply_bot.scheduler import ReplyScheduler
 from chatwoot_autoreply_bot.signature import verify
@@ -37,10 +44,7 @@ log = logging.getLogger(__name__)
 
 Clock = Callable[[], float]
 VALKEY_TIMEOUT_SECONDS = 2.0
-
-
-class BodyTooLarge(Exception):
-    """The request body exceeds the configured limit."""
+KEY_CHECK_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass
@@ -48,6 +52,8 @@ class Services:
     store: ValkeyStore
     scheduler: ReplyScheduler
     closers: list[Callable[[], Awaitable[Any]]] = field(default_factory=list)
+    keystore: InboxKeyStore | None = None
+    inbox_recorder: InboxRecorder | None = None
 
     async def aclose(self) -> None:
         await self.scheduler.aclose()
@@ -64,27 +70,51 @@ def store_limits(settings: Settings) -> StoreLimits:
     )
 
 
+def llm_limits(settings: Settings) -> LlmLimits:
+    return LlmLimits(settings.llm_timeout_seconds, settings.llm_max_retries, settings.llm_max_tokens)
+
+
+def key_check_limits(settings: Settings) -> LlmLimits:
+    return LlmLimits(min(settings.llm_timeout_seconds, KEY_CHECK_TIMEOUT_SECONDS), 0, settings.llm_max_tokens)
+
+
+def valkey_client(url: str) -> Redis:
+    return Redis.from_url(url, socket_timeout=VALKEY_TIMEOUT_SECONDS, socket_connect_timeout=VALKEY_TIMEOUT_SECONDS)
+
+
+def fallback_llm(settings: Settings) -> LlmClient | None:
+    if not settings.has_fallback_llm:
+        return None
+    credentials = LlmCredentials(settings.llm_base_url, str(settings.llm_model), str(settings.llm_api_key))
+    return LlmClient.for_credentials(credentials, llm_limits(settings))
+
+
+def build_keystore(settings: Settings) -> tuple[InboxKeyStore, Redis] | None:
+    if not (settings.keystore_valkey_url and settings.key_encryption_key):
+        return None
+    client = valkey_client(settings.keystore_valkey_url)
+    return InboxKeyStore(client, KeyCipher(settings.key_encryption_key)), client
+
+
 def build_services(settings: Settings) -> Services:
-    valkey = Redis.from_url(
-        settings.valkey_url,
-        socket_timeout=VALKEY_TIMEOUT_SECONDS,
-        socket_connect_timeout=VALKEY_TIMEOUT_SECONDS,
-    )
+    valkey = valkey_client(settings.valkey_url)
     store = ValkeyStore(valkey, store_limits(settings))
+    built_keystore = build_keystore(settings)
+    keystore = built_keystore[0] if built_keystore else None
     chatwoot = ChatwootClient.build(
         settings.chatwoot_internal_url, settings.chatwoot_bot_token, settings.chatwoot_timeout_seconds
     )
-    llm = LlmClient.build(
-        api_key=settings.llm_api_key,
-        base_url=settings.llm_base_url,
-        model=settings.llm_model,
-        timeout=settings.llm_timeout_seconds,
-        max_retries=settings.llm_max_retries,
-        max_tokens=settings.llm_max_tokens,
+    limits = llm_limits(settings)
+    llms = LlmRouter(
+        client_factory=lambda credentials: LlmClient.for_credentials(credentials, limits),
+        keystore=keystore,
+        fallback=fallback_llm(settings),
+        connect_url=settings.connect_url,
+        allowed_hosts=settings.llm_base_url_allowlist,
     )
     responder = Responder(
         chatwoot=chatwoot,
-        llm=llm,
+        llms=llms,
         store=store,
         prompt_for=settings.prompt_for,
         handoff_message=settings.handoff_message,
@@ -97,7 +127,11 @@ def build_services(settings: Settings) -> Services:
         hand_off=responder.hand_off,
         debounce_seconds=settings.debounce_seconds,
     )
-    return Services(store, scheduler, [chatwoot.aclose, llm.aclose, valkey.aclose])
+    closers: list[Callable[[], Awaitable[Any]]] = [chatwoot.aclose, llms.aclose, valkey.aclose]
+    if built_keystore:
+        closers.append(built_keystore[1].aclose)
+    recorder = InboxRecorder(keystore) if keystore else None
+    return Services(store, scheduler, closers, keystore, recorder)
 
 
 async def record_and_schedule(services: Services, payload: Any) -> None:
@@ -111,12 +145,15 @@ async def record_and_schedule(services: Services, payload: Any) -> None:
         await services.store.advance_answered(event.key, event.message_id)
     if should_reply(event):
         await services.scheduler.schedule(event.key)
+    if services.inbox_recorder is not None:
+        await services.inbox_recorder.record(parse_inbox(payload))
 
 
 def create_app(
     settings: Settings,
     services_factory: Callable[[Settings], Services] = build_services,
     clock: Clock = time.time,
+    credential_check: CredentialCheck | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -129,6 +166,8 @@ def create_app(
             await services.aclose()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    if settings.connect_enabled:
+        app.include_router(connect_router(_connect_deps(settings, clock, credential_check)))
 
     @app.get("/healthz")
     async def healthz(request: Request) -> JSONResponse:
@@ -164,19 +203,22 @@ def create_app(
     return app
 
 
-async def read_limited_body(request: Request, max_bytes: int) -> bytes:
-    """Read the body before it is authenticated, refusing anything over ``max_bytes`` without buffering it."""
-    declared = parse_digits(request.headers.get("content-length", ""))
-    if declared is not None and declared > max_bytes:
-        raise BodyTooLarge
-    chunks: list[bytes] = []
-    received = 0
-    async for chunk in request.stream():
-        received += len(chunk)
-        if received > max_bytes:
-            raise BodyTooLarge
-        chunks.append(chunk)
-    return b"".join(chunks)
+def _connect_deps(settings: Settings, clock: Clock, credential_check: CredentialCheck | None) -> ConnectDeps:
+    limits = key_check_limits(settings)
+
+    async def check(credentials: LlmCredentials) -> str | None:
+        return await check_credentials(credentials, limits)
+
+    return ConnectDeps(
+        allowlist=AdminAllowlist.build(settings.connect_admin_ids, settings.default_email_domain),
+        edge_secret=str(settings.connect_edge_secret),
+        trust_preferred_username=settings.connect_trust_preferred_username,
+        public_origin=str(settings.public_base_url),
+        allowed_hosts=frozenset(settings.llm_base_url_allowlist),
+        check_credentials=credential_check or check,
+        keystore_of=lambda request: request.app.state.services.keystore,
+        clock=clock,
+    )
 
 
 async def _resume_quietly(services: Services) -> None:

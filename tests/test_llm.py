@@ -12,7 +12,9 @@ from chatwoot_autoreply_bot.llm import (
     HANDOFF_SENTINEL,
     Decision,
     LlmClient,
+    LlmCredentials,
     LlmError,
+    LlmLimits,
     build_messages,
     decide,
 )
@@ -88,3 +90,33 @@ async def test_build_and_close() -> None:
         api_key="k", base_url="https://llm.test/v1", model="m", timeout=5, max_retries=1, max_tokens=None
     )
     await client.aclose()
+
+
+async def test_a_redirect_is_never_followed_off_host() -> None:
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        return httpx.Response(307, headers={"Location": "https://evil.example/v1/chat/completions"})
+
+    client = LlmClient.build(
+        api_key="k",
+        base_url="https://llm.test/v1",
+        model="m",
+        timeout=5,
+        max_retries=0,
+        max_tokens=None,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(LlmError):
+        await client.complete([{"role": "user", "content": "secret transcript"}])
+    await client.aclose()
+    assert hosts == ["llm.test"]
+    assert client._client._client.is_closed
+
+
+def test_built_client_does_not_follow_redirects() -> None:
+    client = LlmClient.for_credentials(LlmCredentials("https://api.openai.com/v1", "m", "k"), LlmLimits(7, 0))
+    http = client._client._client
+    assert http.follow_redirects is False
+    assert http.timeout.read == 7

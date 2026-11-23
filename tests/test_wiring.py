@@ -5,8 +5,10 @@ import pytest
 from chatwoot_autoreply_bot import __main__ as entry
 from chatwoot_autoreply_bot.app import build_services
 from chatwoot_autoreply_bot.config import Settings
+from chatwoot_autoreply_bot.keystore import InboxKeyStore
 from chatwoot_autoreply_bot.scheduler import ReplyScheduler
 from chatwoot_autoreply_bot.store import ValkeyStore
+from tests.helpers import FERNET_KEY
 from tests.test_config import REQUIRED_ENV
 
 
@@ -18,6 +20,41 @@ async def test_build_services_wires_real_clients() -> None:
     pool_kwargs = services.store._client.connection_pool.connection_kwargs
     assert pool_kwargs["socket_timeout"] == 2.0
     assert pool_kwargs["socket_connect_timeout"] == 2.0
+    assert services.keystore is None
+    assert services.inbox_recorder is None
+    await services.aclose()
+
+
+async def test_build_services_wires_the_keystore_and_connect_page() -> None:
+    env = {
+        **REQUIRED_ENV,
+        "CONNECT_ADMIN_MPASS_IDS": "1234",
+        "KEY_ENCRYPTION_KEY": FERNET_KEY,
+        "KEYSTORE_VALKEY_URL": "redis://keystore:6379/0",
+        "PUBLIC_BASE_URL": "https://bot.example.com",
+        "CONNECT_EDGE_SECRET": "e" * 32,
+    }
+    settings = Settings.from_env(env)
+    services = build_services(settings)
+    assert isinstance(services.keystore, InboxKeyStore)
+    assert services.inbox_recorder is not None
+    assert len(services.closers) == 4
+    keystore_pool = services.keystore._client.connection_pool
+    assert keystore_pool.connection_kwargs["host"] == "keystore"
+    assert keystore_pool.connection_kwargs["socket_timeout"] == 2.0
+    router = services.scheduler._respond.__self__._llms
+    assert router._connect_url == "https://bot.example.com/connect"
+    assert router._fallback is not None
+    await services.aclose()
+
+
+async def test_build_services_without_an_env_llm() -> None:
+    env = {name: value for name, value in REQUIRED_ENV.items() if name not in ("LLM_API_KEY", "LLM_MODEL")} | {
+        "KEY_ENCRYPTION_KEY": FERNET_KEY,
+        "KEYSTORE_VALKEY_URL": "redis://keystore:6379/0",
+    }
+    services = build_services(Settings.from_env(env))
+    assert services.scheduler._respond.__self__._llms._fallback is None
     await services.aclose()
 
 
